@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SplitExpense – Group Detail</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0D0D0D;
+    --surface-1: #141414;
+    --surface-2: #1C1C1C;
+    --surface-3: #242424;
+    --border:    #2E2E2E;
+    --border-hi: #3A3A3A;
+    --text-1:    #F2F2F2;
+    --text-2:    #9A9A9A;
+    --text-3:    #5A5A5A;
+    --green:     #4AFF8C;
+    --green-dim: rgba(74,255,140,0.12);
+    --red:       #FF5F5F;
+    --red-dim:   rgba(255,95,95,0.12);
+    --amber:     #FFB830;
+    --mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    background: #0A0A0A;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 48px 24px;
+    gap: 48px;
+    font-family: var(--mono);
+    min-height: 100vh;
+  }
+
+  .phone {
+    width: 390px;
+    height: 844px;
+    background: var(--bg);
+    border-radius: 44px;
+    border: 2px solid #2A2A2A;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    position: relative;
+    box-shadow:
+      0 0 0 6px #111,
+      0 0 0 7px #222,
+      0 40px 80px rgba(0,0,0,0.85),
+      inset 0 1px 0 rgba(255,255,255,0.04);
+  }
+
+  /* Status bar */
+  .status-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 28px 6px;
+    background: var(--surface-1);
+  }
+  .status-bar .time { font-size: 13px; font-weight: 600; color: var(--text-1); letter-spacing: 0.04em; }
+  .status-icons { display: flex; gap: 6px; align-items: center; }
+
+  /* App bar */
+  .app-bar {
+    background: var(--surface-1);
+    padding: 10px 18px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  .app-bar-row { display: flex; align-items: center; gap: 10px; flex-wrap: nowrap; }
+  .back-btn {
+    width: 32px; height: 32px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-2);
+    flex-shrink: 0;
+  }
+  .group-header { flex: 1; min-width: 0; overflow: hidden; }
+  .group-title-row { display: flex; align-items: center; gap: 6px; }
+  .group-emoji { font-size: 16px; flex-shrink: 0; }
+  .group-title { font-size: 15px; font-weight: 700; color: var(--text-1); letter-spacing: -0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .group-meta { font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .more-btn {
+    width: 32px; height: 32px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--text-2);
+  }
+
+  /* Stats strip */
+  .stats-strip {
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    padding: 10px 18px;
+    gap: 0;
+  }
+  .stat-item {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    position: relative;
+  }
+  .stat-item + .stat-item::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 4px; bottom: 4px;
+    width: 1px;
+    background: var(--border);
+  }
+  .stat-val { font-size: 12px; font-weight: 700; color: var(--text-1); letter-spacing: -0.03em; white-space: nowrap; }
+  .stat-lbl { font-size: 7px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap; }
+  .stat-icon { font-size: 10px; color: var(--green); margin-bottom: 1px; }
+
+  /* Tab row */
+  .tab-row {
+    background: var(--surface-1);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    padding: 0 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .tab-row::-webkit-scrollbar { display: none; }
+  .tab {
+    padding: 11px 14px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-3);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    cursor: pointer;
+    white-space: nowrap;
+    position: relative;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+  }
+  .tab.active {
+    color: var(--text-1);
+    border-bottom-color: var(--green);
+  }
+
+  /* Content */
+  .content {
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-width: none;
+    padding: 12px 14px 100px;
+  }
+  .content::-webkit-scrollbar { display: none; }
+
+  /* Expense item */
+  .expense-item {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .cat-icon {
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .exp-info { flex: 1; min-width: 0; }
+  .exp-title { font-size: 11px; font-weight: 600; color: var(--text-1); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .exp-meta { font-size: 9px; color: var(--text-3); margin-top: 2px; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .exp-right { text-align: right; flex-shrink: 0; }
+  .exp-amount { font-size: 13px; font-weight: 700; color: var(--text-1); letter-spacing: -0.03em; }
+  .exp-share { font-size: 9px; color: var(--text-3); margin-top: 2px; }
+
+  /* Date label */
+  .date-label {
+    font-size: 8px;
+    color: var(--text-3);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    padding: 12px 2px 6px;
+  }
+  .date-label:first-child { padding-top: 4px; }
+
+  /* FAB */
+  .fab {
+    position: absolute;
+    bottom: 28px; right: 22px;
+    width: 52px; height: 52px;
+    background: var(--text-1);
+    border-radius: 16px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+    color: var(--bg);
+  }
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════ SCREEN 1 – EXPENSES TAB ═══ -->
+<div class="phone">
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <span class="time">09:41</span>
+    <div class="status-icons">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none"><rect x="0" y="3" width="3" height="9" rx="1" fill="#F2F2F2"/><rect x="4.5" y="2" width="3" height="10" rx="1" fill="#F2F2F2"/><rect x="9" y="0" width="3" height="12" rx="1" fill="#F2F2F2"/><rect x="13.5" y="0" width="2.5" height="12" rx="1" fill="#F2F2F2" opacity="0.3"/></svg>
+      <svg width="24" height="12" viewBox="0 0 24 12" fill="none"><rect x="0.5" y="0.5" width="20" height="11" rx="3.5" stroke="#F2F2F2" stroke-opacity="0.35"/><rect x="2" y="2" width="14" height="8" rx="2" fill="#F2F2F2"/><path d="M22 4.5v3a1.5 1.5 0 000-3z" fill="#F2F2F2" opacity="0.4"/></svg>
+    </div>
+  </div>
+
+  <!-- App Bar -->
+  <div class="app-bar">
+    <div class="app-bar-row">
+      <div class="back-btn">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </div>
+      <div class="group-header">
+        <div class="group-title-row">
+          <span class="group-emoji">🏖️</span>
+          <span class="group-title">Goa Trip</span>
+        </div>
+        <div class="group-meta">Beach vacation 2024 · 4 members</div>
+      </div>
+      <div class="more-btn">
+        <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Strip -->
+  <div class="stats-strip">
+    <div class="stat-item">
+      <div class="stat-val">₹20,400</div>
+      <div class="stat-lbl">Total spent</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val">5</div>
+      <div class="stat-lbl">Expenses</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" style="color:var(--amber)">₹1,650</div>
+      <div class="stat-lbl">Pending</div>
+    </div>
+    <div class="stat-item">
+      <div class="stat-val" style="color:var(--green)">72%</div>
+      <div class="stat-lbl">Settled</div>
+    </div>
+  </div>
+
+  <!-- Tab Row -->
+  <div class="tab-row">
+    <div class="tab active">Expenses</div>
+    <div class="tab">Members</div>
+    <div class="tab">Balances</div>
+    <div class="tab">Charts</div>
+  </div>
+
+  <!-- Content: Expenses -->
+  <div class="content">
+    <div class="date-label">8 days ago</div>
+
+    <div class="expense-item">
+      <div class="cat-icon" style="background:rgba(41,182,246,0.12)">✈️</div>
+      <div class="exp-info">
+        <div class="exp-title">Hotel (2 nights)</div>
+        <div class="exp-meta">Paid by Alice · Travel</div>
+      </div>
+      <div class="exp-right">
+        <div class="exp-amount">₹8,000</div>
+        <div class="exp-share">₹2,000/person</div>
+      </div>
+    </div>
+
+    <div class="expense-item">
+      <div class="cat-icon" style="background:rgba(239,83,80,0.12)">🍽️</div>
+      <div class="exp-info">
+        <div class="exp-title">Beach shack dinner</div>
+        <div class="exp-meta">Paid by Bob · Food</div>
+      </div>
+      <div class="exp-right">
+        <div class="exp-amount">₹3,200</div>
+        <div class="exp-share">₹800/person</div>
+      </div>
+    </div>
+
+    <div class="date-label">7 days ago</div>
+
+    <div class="expense-item">
+      <div class="cat-icon" style="background:rgba(102,187,106,0.12)">🎯</div>
+      <div class="exp-info">
+        <div class="exp-title">Jet ski &amp; parasailing</div>
+        <div class="exp-meta">Paid by Charlie · Entertainment</div>
+      </div>
+      <div class="exp-right">
+        <div class="exp-amount">₹5,600</div>
+        <div class="exp-share">₹1,400/person</div>
+      </div>
+    </div>
+
+    <div class="expense-item">
+      <div class="cat-icon" style="background:rgba(41,182,246,0.12)">🚕</div>
+      <div class="exp-info">
+        <div class="exp-title">Taxi &amp; fuel</div>
+        <div class="exp-meta">Paid by Diana · Travel</div>
+      </div>
+      <div class="exp-right">
+        <div class="exp-amount">₹2,400</div>
+        <div class="exp-share">₹600/person</div>
+      </div>
+    </div>
+
+    <div class="date-label">6 days ago</div>
+
+    <div class="expense-item">
+      <div class="cat-icon" style="background:rgba(239,83,80,0.12)">☕</div>
+      <div class="exp-info">
+        <div class="exp-title">Breakfast Day 2</div>
+        <div class="exp-meta">Paid by Alice · Food</div>
+      </div>
+      <div class="exp-right">
+        <div class="exp-amount">₹1,200</div>
+        <div class="exp-share">₹300/person</div>
+      </div>
+    </div>
+
+    <!-- Total Row -->
+    <div style="margin-top:14px;padding:12px 14px;background:var(--surface-2);border:1px solid var(--border);border-radius:12px;display:flex;justify-content:space-between;align-items:center;">
+      <div>
+        <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.1em">Group Total</div>
+        <div style="font-size:18px;font-weight:700;color:var(--text-1);margin-top:2px;letter-spacing:-0.03em">₹20,400</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.1em">Your share</div>
+        <div style="font-size:18px;font-weight:700;color:var(--amber);margin-top:2px;letter-spacing:-0.03em">₹5,100</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- FAB -->
+  <div class="fab">
+    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </div>
+</div>
+
+
+<!-- ═════════════════════════════════════════ SCREEN 2 – CHARTS TAB ═══ -->
+<div class="phone">
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <span class="time">09:41</span>
+    <div class="status-icons">
+      <svg width="16" height="12" viewBox="0 0 16 12" fill="none"><rect x="0" y="3" width="3" height="9" rx="1" fill="#F2F2F2"/><rect x="4.5" y="2" width="3" height="10" rx="1" fill="#F2F2F2"/><rect x="9" y="0" width="3" height="12" rx="1" fill="#F2F2F2"/></svg>
+      <svg width="24" height="12" viewBox="0 0 24 12" fill="none"><rect x="0.5" y="0.5" width="20" height="11" rx="3.5" stroke="#F2F2F2" stroke-opacity="0.35"/><rect x="2" y="2" width="14" height="8" rx="2" fill="#F2F2F2"/></svg>
+    </div>
+  </div>
+
+  <!-- App Bar -->
+  <div class="app-bar">
+    <div class="app-bar-row">
+      <div class="back-btn">
+        <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>
+      </div>
+      <div class="group-header">
+        <div class="group-title-row">
+          <span class="group-emoji">🏖️</span>
+          <span class="group-title">Goa Trip</span>
+        </div>
+        <div class="group-meta">Beach vacation 2024 · 4 members</div>
+      </div>
+      <div class="more-btn">
+        <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Stats Strip -->
+  <div class="stats-strip">
+    <div class="stat-item"><div class="stat-val">₹20,400</div><div class="stat-lbl">Total spent</div></div>
+    <div class="stat-item"><div class="stat-val">5</div><div class="stat-lbl">Expenses</div></div>
+    <div class="stat-item"><div class="stat-val" style="color:var(--amber)">₹1,650</div><div class="stat-lbl">Pending</div></div>
+    <div class="stat-item"><div class="stat-val" style="color:var(--green)">72%</div><div class="stat-lbl">Settled</div></div>
+  </div>
+
+  <!-- Tab Row -->
+  <div class="tab-row">
+    <div class="tab">Expenses</div>
+    <div class="tab">Members</div>
+    <div class="tab">Balances</div>
+    <div class="tab active">Charts</div>
+  </div>
+
+  <!-- Content: Charts -->
+  <div class="content" style="padding:14px 14px 100px">
+
+    <!-- ── Spending by Category ── -->
+    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px">
+      <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:14px">Spending by Category</div>
+
+      <div style="display:flex;align-items:center;gap:16px">
+        <!-- Donut chart -->
+        <div style="position:relative;flex-shrink:0">
+          <svg width="100" height="100" viewBox="0 0 100 100">
+            <!-- bg ring -->
+            <circle cx="50" cy="50" r="36" fill="none" stroke="#262626" stroke-width="13"/>
+            <!-- Travel 51% — neon green -->
+            <circle cx="50" cy="50" r="36" fill="none" stroke="#4AFF8C" stroke-width="13"
+              stroke-dasharray="115.6 226.2" stroke-dashoffset="2" stroke-linecap="round"
+              transform="rotate(-90 50 50)"/>
+            <!-- Food 22% — mid gray -->
+            <circle cx="50" cy="50" r="36" fill="none" stroke="#8A8A8A" stroke-width="13"
+              stroke-dasharray="49.8 226.2" stroke-dashoffset="-113.6" stroke-linecap="round"
+              transform="rotate(-90 50 50)"/>
+            <!-- Entertainment 27% — dim gray, visible against bg -->
+            <circle cx="50" cy="50" r="36" fill="none" stroke="#585858" stroke-width="13"
+              stroke-dasharray="61.1 226.2" stroke-dashoffset="-162.0" stroke-linecap="round"
+              transform="rotate(-90 50 50)"/>
+          </svg>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+            <span style="font-size:9px;font-weight:700;color:var(--text-1)">₹20k</span>
+            <span style="font-size:7px;color:var(--text-3)">total</span>
+          </div>
+        </div>
+
+        <!-- Legend -->
+        <div style="flex:1;display:flex;flex-direction:column;gap:9px;min-width:0">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <div style="width:8px;height:8px;border-radius:2px;background:var(--green);flex-shrink:0"></div>
+              <span style="font-size:9px;color:var(--text-2)">Travel</span>
+            </div>
+            <span style="font-size:9px;font-weight:700;color:var(--green);white-space:nowrap">51%  ₹10.4k</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <div style="width:8px;height:8px;border-radius:2px;background:#6A6A6A;flex-shrink:0"></div>
+              <span style="font-size:9px;color:var(--text-2)">Food</span>
+            </div>
+            <span style="font-size:9px;font-weight:700;color:var(--text-2);white-space:nowrap">22%  ₹4.4k</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:4px">
+            <div style="display:flex;align-items:center;gap:5px;flex-shrink:0">
+              <div style="width:8px;height:8px;border-radius:2px;background:#3A3A3A;border:1px solid #4A4A4A;flex-shrink:0"></div>
+              <span style="font-size:9px;color:var(--text-2)">Entertain</span>
+            </div>
+            <span style="font-size:9px;font-weight:700;color:var(--text-3);white-space:nowrap">27%  ₹5.6k</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Member Balances ── -->
+    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px">
+      <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:14px">Member Balances</div>
+
+      <!-- Alice -->
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:20px;height:20px;border-radius:50%;background:#E53935;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;color:#fff">A</div>
+            <span style="font-size:10px;color:var(--text-1)">Alice</span>
+          </div>
+          <span style="font-size:10px;font-weight:700;color:var(--green)">+₹3,800</span>
+        </div>
+        <div style="height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:74%;background:var(--green);border-radius:2px"></div>
+        </div>
+      </div>
+
+      <!-- Bob -->
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:20px;height:20px;border-radius:50%;background:#1E88E5;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;color:#fff">B</div>
+            <span style="font-size:10px;color:var(--text-1)">Bob</span>
+          </div>
+          <span style="font-size:10px;font-weight:700;color:var(--red)">-₹1,600</span>
+        </div>
+        <div style="height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:32%;background:var(--red);border-radius:2px"></div>
+        </div>
+      </div>
+
+      <!-- Charlie -->
+      <div style="margin-bottom:10px">
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:20px;height:20px;border-radius:50%;background:#43A047;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;color:#fff">C</div>
+            <span style="font-size:10px;color:var(--text-1)">Charlie</span>
+          </div>
+          <span style="font-size:10px;font-weight:700;color:var(--green)">+₹200</span>
+        </div>
+        <div style="height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:4%;background:var(--green);border-radius:2px"></div>
+        </div>
+      </div>
+
+      <!-- Diana -->
+      <div>
+        <div style="display:flex;justify-content:space-between;margin-bottom:4px">
+          <div style="display:flex;align-items:center;gap:6px">
+            <div style="width:20px;height:20px;border-radius:50%;background:#8E24AA;display:flex;align-items:center;justify-content:center;font-size:7px;font-weight:700;color:#fff">D</div>
+            <span style="font-size:10px;color:var(--text-1)">Diana</span>
+          </div>
+          <span style="font-size:10px;font-weight:700;color:var(--red)">-₹2,400</span>
+        </div>
+        <div style="height:4px;background:var(--surface-3);border-radius:2px;overflow:hidden">
+          <div style="height:100%;width:47%;background:var(--red);border-radius:2px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Simplified Debts ── -->
+    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.12em">Settle Up</div>
+        <div style="font-size:8px;color:var(--text-3);background:var(--surface-3);border:1px solid var(--border);border-radius:4px;padding:2px 6px">2 txns</div>
+      </div>
+
+      <!-- Debt row 1 -->
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--border)">
+        <div style="width:28px;height:28px;border-radius:50%;background:#1E88E5;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff">B</div>
+        <div style="flex:1">
+          <span style="font-size:10px;font-weight:600;color:var(--red)">Bob</span>
+          <span style="font-size:9px;color:var(--text-3)"> owes </span>
+          <span style="font-size:10px;font-weight:600;color:var(--green)">Alice</span>
+        </div>
+        <div style="background:var(--red-dim);border:1px solid rgba(255,95,95,0.2);border-radius:6px;padding:4px 10px">
+          <span style="font-size:11px;font-weight:700;color:var(--red)">₹1,600</span>
+        </div>
+      </div>
+
+      <!-- Debt row 2 -->
+      <div style="display:flex;align-items:center;gap:8px;padding:10px 0">
+        <div style="width:28px;height:28px;border-radius:50%;background:#8E24AA;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff">D</div>
+        <div style="flex:1">
+          <span style="font-size:10px;font-weight:600;color:var(--red)">Diana</span>
+          <span style="font-size:9px;color:var(--text-3)"> owes </span>
+          <span style="font-size:10px;font-weight:600;color:var(--green)">Alice</span>
+        </div>
+        <div style="background:var(--red-dim);border:1px solid rgba(255,95,95,0.2);border-radius:6px;padding:4px 10px">
+          <span style="font-size:11px;font-weight:700;color:var(--red)">₹2,200</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Monthly Trend (simple bar chart) ── -->
+    <div style="background:var(--surface-2);border:1px solid var(--border);border-radius:14px;padding:16px">
+      <div style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:16px">Daily Spending</div>
+      <div style="display:flex;align-items:flex-end;gap:6px;height:60px">
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;position:relative;display:flex;align-items:flex-end">
+            <div style="width:100%;height:38%;background:#3A3A3A;border-radius:3px 3px 0 0"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:100%;background:var(--green);border-radius:3px 3px 0 0;opacity:0.9"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:68%;background:var(--green);border-radius:3px 3px 0 0;opacity:0.7"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:16%;background:var(--green);border-radius:3px 3px 0 0;opacity:0.5"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:45%;background:var(--green);border-radius:3px 3px 0 0;opacity:0.6"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:0%;background:var(--green);border-radius:3px 3px 0 0"></div>
+          </div>
+        </div>
+        <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:4px">
+          <div style="flex:1;width:100%;background:var(--surface-3);border-radius:3px 3px 0 0;display:flex;align-items:flex-end">
+            <div style="width:100%;height:0%;background:var(--green);border-radius:3px 3px 0 0"></div>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;margin-top:6px">
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">M</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--green)">T</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">W</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">T</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">F</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">S</div>
+        <div style="flex:1;text-align:center;font-size:7px;color:var(--text-3)">S</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- FAB -->
+  <div class="fab">
+    <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </div>
+</div>
+
+</body>
+</html>

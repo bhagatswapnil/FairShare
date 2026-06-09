@@ -1,0 +1,2 @@
+-keep class com.splitexpense.data.db.entity.** { *; }
+-keepclassmembers class * extends androidx.room.RoomDatabase { *; }

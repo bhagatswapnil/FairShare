@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>FairShare – PDF Preview</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #2a2a2a;
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    padding: 32px 24px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 40px;
+  }
+
+  h2 {
+    color: #9a9a9a;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: 400;
+    text-align: center;
+  }
+
+  /* ── Page shell ── */
+  .page {
+    width: 595px;
+    min-height: 842px;
+    background: #fff;
+    box-shadow: 0 8px 40px rgba(0,0,0,.55);
+    position: relative;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  /* ── Header bar ── */
+  .pg-header {
+    background: #111;
+    height: 64px;
+    display: flex;
+    align-items: flex-end;
+    padding: 0 40px 12px;
+    justify-content: space-between;
+  }
+  .pg-header-left { display: flex; flex-direction: column; gap: 3px; }
+  .pg-header-app  { color: #fff; font-size: 14px; font-weight: 700; line-height: 1; }
+  .pg-header-sub  { color: #aaa; font-size: 8px; letter-spacing: .4px; line-height: 1; }
+  .pg-header-ts   { color: #aaa; font-size: 8px; text-align: right; align-self: flex-end; }
+
+  /* ── Content area ── */
+  .content { padding: 18px 40px 40px; }
+
+  /* ── Group title ── */
+  .group-title {
+    font-size: 22px;
+    font-weight: 700;
+    color: #111;
+    margin-bottom: 4px;
+    line-height: 1.15;
+  }
+  .group-desc { font-size: 9px; color: #888; margin-bottom: 8px; }
+  .date-range { font-size: 8px; color: #888; margin-bottom: 16px; }
+
+  /* ── Stat chips ── */
+  .stats { display: flex; gap: 6px; margin-bottom: 18px; }
+  .stat-chip {
+    flex: 1;
+    background: #f2f2f2;
+    border-radius: 6px;
+    padding: 8px 10px;
+  }
+  .stat-value {
+    font-size: 14px;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    color: #111;
+    line-height: 1.2;
+  }
+  .stat-label { font-size: 8px; color: #888; margin-top: 2px; }
+
+  /* ── Rules ── */
+  .hrule      { border: none; border-top: .8px solid #e0e0e0; margin: 12px 0; }
+  .hrule-thin { border: none; border-top: .4px solid #e0e0e0; margin: 8px 0; }
+
+  /* ── Section title ── */
+  .section-title {
+    font-size: 7.5px;
+    font-weight: 700;
+    color: #888;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  /* ── Table ── */
+  table { width: 100%; border-collapse: collapse; font-size: 8px; }
+  thead th {
+    font-size: 7.5px;
+    font-weight: 700;
+    color: #888;
+    padding: 0 4px 5px;
+    text-align: left;
+    border-bottom: .4px solid #e0e0e0;
+  }
+  thead th.r { text-align: right; }
+  tbody tr:nth-child(even) td { background: #f8f8f8; }
+  tbody td {
+    padding: 5px 4px;
+    color: #555;
+    font-size: 8.5px;
+    vertical-align: middle;
+    line-height: 1.3;
+  }
+  tbody td.name   { color: #111; font-size: 8.5px; }
+  tbody td.mono   { font-family: 'Courier New', monospace; text-align: right; }
+  tbody td.green  { font-family: 'Courier New', monospace; text-align: right; color: #1a7d3a; font-weight: 700; }
+  tbody td.red    { font-family: 'Courier New', monospace; text-align: right; color: #c0392b; font-weight: 700; }
+  tbody td.settle { color: #888; font-family: 'Courier New', monospace; text-align: right; }
+
+  /* ── Settle rows ── */
+  .settle-row {
+    background: #fdedeb;
+    border-radius: 4px;
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    font-size: 8.5px;
+    line-height: 1;
+  }
+  .settle-from { color: #c0392b; font-weight: 700; }
+  .settle-via  { color: #555; margin: 0 4px; }
+  .settle-to   { color: #1a7d3a; font-weight: 700; }
+  .settle-amt  {
+    margin-left: auto;
+    font-family: 'Courier New', monospace;
+    font-weight: 700;
+    font-size: 9px;
+    color: #c0392b;
+  }
+
+  /* ── Category bars ── */
+  .cat-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 8.5px;
+  }
+  .cat-name  { width: 88px; color: #111; flex-shrink: 0; }
+  .bar-track { flex: 1; height: 6px; background: #f2f2f2; border-radius: 2px; overflow: hidden; }
+  .bar-fill  { height: 100%; background: #111; border-radius: 2px; }
+  .cat-amt   { width: 110px; text-align: right; font-family: 'Courier New', monospace; font-size: 8px; color: #555; flex-shrink: 0; }
+
+  /* ── Page footer ── */
+  .pg-footer {
+    position: absolute;
+    bottom: 0;
+    left: 0; right: 0;
+    padding: 6px 40px 10px;
+    border-top: .4px solid #e0e0e0;
+  }
+  .pg-footer-text {
+    font-size: 7px;
+    color: #888;
+    text-align: center;
+  }
+
+  /* ── Expense detail page ── */
+  .detail-header {
+    background: #111;
+    height: 58px;
+    display: flex;
+    align-items: flex-end;
+    padding: 0 40px 12px;
+    justify-content: space-between;
+  }
+  .detail-header-title { color: #fff; font-size: 9px; font-weight: 700; letter-spacing: .8px; }
+  .detail-header-sub   { color: #aaa; font-size: 8px; text-align: right; }
+
+  .detail-table { width: 100%; border-collapse: collapse; font-size: 7.5px; }
+  .detail-table thead th {
+    font-size: 7px;
+    font-weight: 700;
+    color: #888;
+    padding: 4px 3px 5px;
+    text-align: left;
+    border-bottom: .8px solid #e0e0e0;
+  }
+  .detail-table thead th.r { text-align: right; }
+  /* Alternating background per expense GROUP (tbody), not per row */
+  .detail-table tbody:nth-child(even) td { background: #f8f8f8; }
+  .detail-table tbody td {
+    padding: 5px 3px 3px;
+    font-size: 7.5px;
+    color: #555;
+    vertical-align: middle;
+  }
+  .detail-table tbody td.desc { font-weight: 700; color: #111; font-size: 8px; }
+  .detail-table tbody td.amt  { font-family: 'Courier New', monospace; font-weight: 700; color: #111; text-align: right; font-size: 8px; }
+  /* Per-member split sub-rows — tight gap below expense name */
+  .detail-table tbody tr.split-line td {
+    padding: 0 3px 2px;
+    font-size: 6.5px;
+    color: #888;
+  }
+  .detail-table tbody tr.split-line td.split-name { padding-left: 10px; }
+  .detail-table tbody tr.split-line td.split-amt  { font-family: 'Courier New', monospace; text-align: right; color: #555; }
+
+  .cat-chip {
+    display: inline-block;
+    background: #f2f2f2;
+    border-radius: 3px;
+    padding: 2px 4px;
+    font-size: 7px;
+    color: #555;
+  }
+
+  .grand-total-row td {
+    padding-top: 10px;
+    font-weight: 700;
+    color: #111;
+    font-size: 9px;
+    border-top: .8px solid #e0e0e0;
+  }
+  .grand-total-row td.amt {
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    text-align: right;
+  }
+</style>
+</head>
+<body>
+
+<h2>FairShare — Exported PDF Preview</h2>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     PAGE 1 — SUMMARY
+     ═══════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+  <!-- Header -->
+  <div class="pg-header">
+    <div class="pg-header-left">
+      <span class="pg-header-app">FairShare</span>
+      <span class="pg-header-sub">Expense Report</span>
+    </div>
+    <span class="pg-header-ts">20 Jun 2025, 14:32</span>
+  </div>
+
+  <div class="content">
+
+    <!-- Group title -->
+    <div class="group-title">🏖️&nbsp;&nbsp;Goa Trip</div>
+    <div class="group-desc">Beach vacation 2025</div>
+    <div class="date-range">Period: 15 Jun 2025 – 20 Jun 2025</div>
+
+    <!-- Stats chips -->
+    <div class="stats">
+      <div class="stat-chip">
+        <div class="stat-value">₹20,400.00</div>
+        <div class="stat-label">Total Spent</div>
+      </div>
+      <div class="stat-chip">
+        <div class="stat-value">8</div>
+        <div class="stat-label">Expenses</div>
+      </div>
+      <div class="stat-chip">
+        <div class="stat-value">4</div>
+        <div class="stat-label">Members</div>
+      </div>
+    </div>
+
+    <hr class="hrule">
+
+    <!-- Member Balances -->
+    <div class="section-title">Member Balances</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:36%">Member</th>
+          <th class="r" style="width:21%">Paid</th>
+          <th class="r" style="width:21%">Share</th>
+          <th class="r" style="width:22%">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="name">Alice Sharma</td>
+          <td class="mono">₹12,000.00</td>
+          <td class="mono">₹5,100.00</td>
+          <td class="green">+₹6,900.00</td>
+        </tr>
+        <tr>
+          <td class="name">Bob Mehta</td>
+          <td class="mono">₹6,400.00</td>
+          <td class="mono">₹5,100.00</td>
+          <td class="green">+₹1,300.00</td>
+        </tr>
+        <tr>
+          <td class="name">Carol Nair</td>
+          <td class="mono">₹2,000.00</td>
+          <td class="mono">₹5,100.00</td>
+          <td class="red">-₹3,100.00</td>
+        </tr>
+        <tr>
+          <td class="name">Dave Pillai</td>
+          <td class="mono">₹0.00</td>
+          <td class="mono">₹5,100.00</td>
+          <td class="red">-₹5,100.00</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <hr class="hrule" style="margin-top:14px">
+
+    <!-- Settle Up -->
+    <div class="section-title">Minimum Payments to Settle</div>
+
+    <div class="settle-row">
+      <span class="settle-from">Dave Pillai</span>
+      <span class="settle-via">owes</span>
+      <span class="settle-to">Alice Sharma</span>
+      <span class="settle-amt">₹5,100.00</span>
+    </div>
+    <div class="settle-row">
+      <span class="settle-from">Carol Nair</span>
+      <span class="settle-via">owes</span>
+      <span class="settle-to">Alice Sharma</span>
+      <span class="settle-amt">₹1,800.00</span>
+    </div>
+    <div class="settle-row">
+      <span class="settle-from">Carol Nair</span>
+      <span class="settle-via">owes</span>
+      <span class="settle-to">Bob Mehta</span>
+      <span class="settle-amt">₹1,300.00</span>
+    </div>
+
+    <hr class="hrule" style="margin-top:14px">
+
+    <!-- Category breakdown -->
+    <div class="section-title">Spending by Category</div>
+
+    <div class="cat-row">
+      <span class="cat-name">🏨 Accommodation</span>
+      <div class="bar-track"><div class="bar-fill" style="width:59%"></div></div>
+      <span class="cat-amt">₹12,000.00&nbsp;&nbsp;(59%)</span>
+    </div>
+    <div class="cat-row">
+      <span class="cat-name">🍕 Food</span>
+      <div class="bar-track"><div class="bar-fill" style="width:22%"></div></div>
+      <span class="cat-amt">₹4,500.00&nbsp;&nbsp;(22%)</span>
+    </div>
+    <div class="cat-row">
+      <span class="cat-name">🚗 Transport</span>
+      <div class="bar-track"><div class="bar-fill" style="width:14%"></div></div>
+      <span class="cat-amt">₹2,800.00&nbsp;&nbsp;(14%)</span>
+    </div>
+    <div class="cat-row">
+      <span class="cat-name">🎉 Activities</span>
+      <div class="bar-track"><div class="bar-fill" style="width:5%"></div></div>
+      <span class="cat-amt">₹1,100.00&nbsp;&nbsp;(5%)</span>
+    </div>
+
+  </div><!-- /content -->
+
+  <!-- Footer -->
+  <div class="pg-footer">
+    <div class="pg-footer-text">FairShare&nbsp;&nbsp;·&nbsp;&nbsp;Expense Report&nbsp;&nbsp;·&nbsp;&nbsp;Page 1</div>
+  </div>
+
+</div><!-- /page 1 -->
+
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     PAGE 2 — EXPENSE DETAIL (split per member shown inline)
+     ═══════════════════════════════════════════════════════════════════ -->
+<div class="page">
+
+  <!-- Detail header -->
+  <div class="detail-header">
+    <span class="detail-header-title">EXPENSE DETAIL</span>
+    <span class="detail-header-sub">8 expenses&nbsp;&nbsp;·&nbsp;&nbsp;Page 2</span>
+  </div>
+
+  <div class="content" style="padding-top:14px; padding-bottom:60px">
+
+    <table class="detail-table">
+      <thead>
+        <tr>
+          <th style="width:13%">Date</th>
+          <th style="width:31%">Description</th>
+          <th style="width:13%">Paid By</th>
+          <th style="width:15%">Category</th>
+          <th class="r" style="width:28%">Amount</th>
+        </tr>
+      </thead>
+
+      <!-- Expense 1 -->
+      <tbody>
+        <tr>
+          <td>20 Jun 2025</td>
+          <td class="desc">Last night dinner</td>
+          <td>Alice</td>
+          <td><span class="cat-chip">Food</span></td>
+          <td class="amt">₹1,800.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹450.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹450.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹450.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹450.00</td></tr>
+      </tbody>
+
+      <!-- Expense 2 — equal split -->
+      <tbody>
+        <tr>
+          <td>19 Jun 2025</td>
+          <td class="desc">Water sports &amp; parasailing</td>
+          <td>Alice</td>
+          <td><span class="cat-chip">Activities</span></td>
+          <td class="amt">₹1,100.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹275.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹275.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹275.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹275.00</td></tr>
+      </tbody>
+
+      <!-- Expense 3 — equal split -->
+      <tbody>
+        <tr>
+          <td>19 Jun 2025</td>
+          <td class="desc">Cab to North Goa beach</td>
+          <td>Bob</td>
+          <td><span class="cat-chip">Transport</span></td>
+          <td class="amt">₹800.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹200.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹200.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹200.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹200.00</td></tr>
+      </tbody>
+
+      <!-- Expense 4 — custom amount split -->
+      <tbody>
+        <tr>
+          <td>18 Jun 2025</td>
+          <td class="desc">Seafood lunch – Fisherman's…</td>
+          <td>Carol</td>
+          <td><span class="cat-chip">Food</span></td>
+          <td class="amt">₹2,000.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (35%)</td><td colspan="2"></td><td class="split-amt">₹700.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (30%)</td><td colspan="2"></td><td class="split-amt">₹600.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (20%)</td><td colspan="2"></td><td class="split-amt">₹400.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (15%)</td><td colspan="2"></td><td class="split-amt">₹300.00</td></tr>
+      </tbody>
+
+      <!-- Expense 5 — equal split -->
+      <tbody>
+        <tr>
+          <td>17 Jun 2025</td>
+          <td class="desc">Airport taxi (return)</td>
+          <td>Bob</td>
+          <td><span class="cat-chip">Transport</span></td>
+          <td class="amt">₹2,000.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹500.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹500.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹500.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹500.00</td></tr>
+      </tbody>
+
+      <!-- Expense 6 — equal split -->
+      <tbody>
+        <tr>
+          <td>16 Jun 2025</td>
+          <td class="desc">Grocery &amp; drinks</td>
+          <td>Alice</td>
+          <td><span class="cat-chip">Food</span></td>
+          <td class="amt">₹700.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹175.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹175.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹175.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹175.00</td></tr>
+      </tbody>
+
+      <!-- Expense 7 — percentage split 25% each -->
+      <tbody>
+        <tr>
+          <td>15 Jun 2025</td>
+          <td class="desc">Villa – 5 nights</td>
+          <td>Alice</td>
+          <td><span class="cat-chip">Accommodation</span></td>
+          <td class="amt">₹12,000.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (25%)</td><td colspan="2"></td><td class="split-amt">₹3,000.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (25%)</td><td colspan="2"></td><td class="split-amt">₹3,000.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (25%)</td><td colspan="2"></td><td class="split-amt">₹3,000.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (25%)</td><td colspan="2"></td><td class="split-amt">₹3,000.00</td></tr>
+      </tbody>
+
+      <!-- Expense 8 — equal split (₹0 total) -->
+      <tbody>
+        <tr>
+          <td>15 Jun 2025</td>
+          <td class="desc">Airport taxi (arrival)</td>
+          <td>Bob</td>
+          <td><span class="cat-chip">Transport</span></td>
+          <td class="amt">₹0.00</td>
+        </tr>
+        <tr class="split-line"><td></td><td class="split-name">· Alice Sharma (0%)</td><td colspan="2"></td><td class="split-amt">₹0.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Bob Mehta (0%)</td><td colspan="2"></td><td class="split-amt">₹0.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Carol Nair (0%)</td><td colspan="2"></td><td class="split-amt">₹0.00</td></tr>
+        <tr class="split-line"><td></td><td class="split-name">· Dave Pillai (0%)</td><td colspan="2"></td><td class="split-amt">₹0.00</td></tr>
+      </tbody>
+
+      <!-- Grand total -->
+      <tbody>
+        <tr class="grand-total-row">
+          <td colspan="4">Grand Total</td>
+          <td class="amt" style="font-size:10px">₹20,400.00</td>
+        </tr>
+      </tbody>
+    </table>
+
+  </div>
+
+  <!-- Footer -->
+  <div class="pg-footer">
+    <div class="pg-footer-text">FairShare&nbsp;&nbsp;·&nbsp;&nbsp;Expense Report&nbsp;&nbsp;·&nbsp;&nbsp;Page 2</div>
+  </div>
+
+</div><!-- /page 2 -->
+
+</body>
+</html>

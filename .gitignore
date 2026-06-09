@@ -1,0 +1,74 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+.DS_Store
+
+# Local properties (contains SDK path, signing keys)
+local.properties
+
+# Generated files
+app/build/
+
+# ProGuard mapping files
+*.map
+
+# APKs and bundles
+*.apk
+*.aab
+*.ap_
+
+# Test results
+*.test-results/
+
+# Kotlin incremental compilation
+kspCaches/
+.kotlin/
+
+# Navigation safe args generated files
+app/src/main/java/**/*Directions.kt
+app/src/main/java/**/*Args.kt
+
+# Capture files / profiling
+*.hprof
+captures/
+
+# Lint
+lint/intermediates/
+lint/generated/
+lint/outputs/
+lint/tmp/
+lint/reports/
+
+# Log files
+*.log
+
+# OS
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Claude
+.claude
+
+# Signing configs (never commit keystore or signing properties)
+*.jks
+*.keystore
+*.p12
+release.properties
+signing.properties
+
+# Crashlytics
+com_crashlytics_export_strings.xml
+crashlytics-build.properties
+fabric.properties
+
+# Dependency lock file (optional: remove if you commit it intentionally)
+# gradle.lockfile

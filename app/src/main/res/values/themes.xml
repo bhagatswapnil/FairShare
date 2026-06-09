@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.FairShare" parent="android:Theme.Material.Light.NoActionBar" />
+    <style name="Theme.FairShare.Splash" parent="Theme.FairShare">
+        <!-- Background of the system splash screen -->
+        <item name="android:windowBackground">#0D0D0D</item>
+        
+        <!-- For API 31+ (Android 12+) to control the splash screen -->
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBackground">#0D0D0D</item>
+        
+        <!-- Ensure status/navigation bars match splash screen theme -->
+        <item name="android:statusBarColor">#0D0D0D</item>
+        <item name="android:navigationBarColor">#0D0D0D</item>
+    </style>
+</resources>
