@@ -16,6 +16,10 @@ interface MemberDao {
     @Query("SELECT * FROM members WHERE id = :id")
     suspend fun getMemberById(id: String): Member?
 
+    /** One-shot read of every member — used by [com.splitexpense.util.BackupManager]. */
+    @Query("SELECT * FROM members ORDER BY name ASC")
+    suspend fun getAllMembersOnce(): List<Member>
+
     @Query("SELECT groupId, COUNT(*) AS count FROM members GROUP BY groupId")
     fun getGroupMemberCounts(): Flow<List<GroupMemberCount>>
 

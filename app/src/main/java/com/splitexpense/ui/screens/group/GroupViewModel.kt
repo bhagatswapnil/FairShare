@@ -9,13 +9,17 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.splitexpense.SplitExpenseApplication
 import com.splitexpense.data.db.entity.Category
 import com.splitexpense.data.db.entity.Expense
+import com.splitexpense.data.db.entity.ExpenseItem
+import com.splitexpense.data.db.entity.ExpenseSplit
 import com.splitexpense.data.db.entity.Group
 import com.splitexpense.data.db.entity.Member
 import com.splitexpense.data.db.entity.Settlement
 import com.splitexpense.data.model.DebtTransaction
 import com.splitexpense.data.model.MemberBalance
 import com.splitexpense.data.repository.ExpenseRepository
+import com.splitexpense.util.AppSettingsManager
 import com.splitexpense.util.PdfExporter
+import com.splitexpense.util.currencySymbolFor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -36,12 +40,17 @@ data class GroupUiState(
     val exportError: String? = null,
     val groupDeleted: Boolean = false,
     val membersWithExpenses: Set<String> = emptySet(),
-    val splitCountByExpenseId: Map<String, Int> = emptyMap()
+    val splitCountByExpenseId: Map<String, Int> = emptyMap(),
+    val splitsByExpenseId: Map<String, List<ExpenseSplit>> = emptyMap(),
+    val expenseItemsByExpenseId: Map<String, List<ExpenseItem>> = emptyMap(),
+    /** The single app-wide currency symbol (e.g. "₹", "$"). Defaults to "₹" until loaded. */
+    val currencySymbol: String = "₹"
 )
 
 class GroupViewModel(
     private val repository: ExpenseRepository,
-    private val groupId: String
+    private val groupId: String,
+    private val appSettingsManager: AppSettingsManager
 ) : ViewModel() {
 
     // Guards against rapid double-taps on the Confirm button producing duplicate rows.
@@ -52,6 +61,20 @@ class GroupViewModel(
     val uiState: StateFlow<GroupUiState> = _uiState.asStateFlow()
 
     init {
+        // Collect bill-scan items separately (6th flow — beyond combine's 5-arg limit)
+        viewModelScope.launch {
+            repository.getItemsForGroup(groupId).collect { items ->
+                _uiState.update { it.copy(expenseItemsByExpenseId = items.groupBy { it.expenseId }) }
+            }
+        }
+
+        // Collect the app-wide currency separately too — same reasoning as the items flow.
+        viewModelScope.launch {
+            appSettingsManager.currencyCode.collect { code ->
+                _uiState.update { it.copy(currencySymbol = currencySymbolFor(code)) }
+            }
+        }
+
         viewModelScope.launch {
             // Combine 5 flows: group, members, expenses, splits, settlements
             combine(
@@ -67,7 +90,8 @@ class GroupViewModel(
                     splits.forEach { add(it.memberId) }
                     settlements.forEach { add(it.fromId); add(it.toId) }
                 }
-                val splitCountByExpenseId = splits.groupBy { it.expenseId }.mapValues { it.value.size }
+                val splitsGrouped = splits.groupBy { it.expenseId }
+                val splitCountByExpenseId = splitsGrouped.mapValues { it.value.size }
                 _uiState.value.copy(
                     group                  = group,
                     members                = members,
@@ -79,9 +103,20 @@ class GroupViewModel(
                     settlements            = settlements,
                     membersWithExpenses    = memberIdsWithExpenses,
                     splitCountByExpenseId  = splitCountByExpenseId,
+                    splitsByExpenseId      = splitsGrouped,
                     isLoading              = false
                 )
-            }.collect { _uiState.value = it }
+            }.collect { newState ->
+                // Use update (CAS) so the expenseItemsByExpenseId and currencySymbol written
+                // by the other two coroutines are never silently overwritten by a concurrent
+                // combine emission.
+                _uiState.update { current ->
+                    newState.copy(
+                        expenseItemsByExpenseId = current.expenseItemsByExpenseId,
+                        currencySymbol          = current.currencySymbol
+                    )
+                }
+            }
         }
     }
 
@@ -103,6 +138,8 @@ class GroupViewModel(
                     name        = name.trim(),
                     description = description.trim(),
                     emoji       = emoji.trim().ifBlank { "💰" }
+                    // currencyCode is intentionally left untouched — currency is now a
+                    // single app-wide setting (AppSettingsManager), not editable per group.
                 )
             )
         }
@@ -162,13 +199,16 @@ class GroupViewModel(
             runCatching {
                 withContext(Dispatchers.IO) {
                     val allSplits = repository.getSplitsForGroupOnce(groupId)
+                    val allItems  = repository.getItemsForGroupOnce(groupId)
                     PdfExporter(context).export(
-                        group    = group,
-                        members  = state.members,
-                        expenses = state.expenses,
-                        splits   = allSplits,
-                        balances = state.balances,
-                        debts    = state.simplifiedDebts
+                        group          = group,
+                        members        = state.members,
+                        expenses       = state.expenses,
+                        splits         = allSplits,
+                        balances       = state.balances,
+                        debts          = state.simplifiedDebts,
+                        expenseItems   = allItems,
+                        currencySymbol = state.currencySymbol
                     )
                 }
             }.fold(
@@ -186,7 +226,7 @@ class GroupViewModel(
         fun factory(groupId: String): ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = checkNotNull(this[APPLICATION_KEY]) as SplitExpenseApplication
-                GroupViewModel(app.repository, groupId)
+                GroupViewModel(app.repository, groupId, app.appSettingsManager)
             }
         }
     }

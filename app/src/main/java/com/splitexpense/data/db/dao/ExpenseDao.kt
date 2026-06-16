@@ -30,6 +30,10 @@ interface ExpenseDao {
     /** All expenses across every group — used by the home screen for pending calculation. */
     @Query("SELECT * FROM expenses")
     fun getAllExpenses(): Flow<List<Expense>>
+
+    /** One-shot read of every expense — used by [com.splitexpense.util.BackupManager]. */
+    @Query("SELECT * FROM expenses")
+    suspend fun getAllExpensesOnce(): List<Expense>
 }
 
 /** Projection used by [getGroupExpenseTotals]. */

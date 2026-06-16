@@ -12,6 +12,14 @@ interface GroupDao {
     @Query("SELECT * FROM groups WHERE id = :id")
     fun getGroupById(id: String): Flow<Group?>
 
+    /** One-shot read of every group — used by [com.splitexpense.util.BackupManager]. */
+    @Query("SELECT * FROM groups ORDER BY createdAt DESC")
+    suspend fun getAllGroupsOnce(): List<Group>
+
+    /** Wipes the entire groups table. FK cascades remove members, expenses, splits, settlements, and items. */
+    @Query("DELETE FROM groups")
+    suspend fun deleteAllGroups()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertGroup(group: Group)
 

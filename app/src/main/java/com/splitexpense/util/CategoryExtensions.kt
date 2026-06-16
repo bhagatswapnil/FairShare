@@ -36,7 +36,7 @@ fun Category.color(): Color = when (this) {
     Category.OTHER         -> Color(0xFF78909C)
 }
 
-fun formatCurrency(amount: Double): String = "₹%.2f".format(amount)
+fun formatCurrency(amount: Double, symbol: String = "₹"): String = "$symbol%.2f".format(amount)
 
 val avatarPalette = listOf(
     0xFFE53935L, 0xFFD81B60L, 0xFF8E24AAL, 0xFF5E35B1L,

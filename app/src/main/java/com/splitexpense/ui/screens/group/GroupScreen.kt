@@ -55,16 +55,22 @@ fun GroupScreen(
     groupId: String,
     onBack: () -> Unit,
     onAddExpense: () -> Unit,
+    onScanBill: () -> Unit = {},
     onEditExpense: (String) -> Unit = {},
     viewModel: GroupViewModel = viewModel(factory = GroupViewModel.factory(groupId))
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    // Sourced from the single app-wide currency setting (AppSettingsManager) — see
+    // GroupUiState.currencySymbol. No longer derived from this group's own field.
+    val currencySymbol = state.currencySymbol
     val context = LocalContext.current
     val tabs = listOf("Expenses", "Members", "Balances", "Charts")
     val pagerState = rememberPagerState(pageCount = { tabs.size })
     val coroutineScope = rememberCoroutineScope()
     var showAddMemberDialog by remember { mutableStateOf(false) }
     var showEditGroupDialog by remember { mutableStateOf(false) }
+    var showNoMembersDialog by remember { mutableStateOf(false) }
+    var fabExpanded by remember { mutableStateOf(false) }
     var deleteExpenseTarget by remember { mutableStateOf<Expense?>(null) }
     var showOverflow by remember { mutableStateOf(false) }
     var showDeleteGroupDialog by remember { mutableStateOf(false) }
@@ -196,12 +202,12 @@ fun GroupScreen(
                     .padding(horizontal = 18.dp, vertical = 10.dp),
                 horizontalArrangement = Arrangement.SpaceEvenly
             ) {
-                StatCell("₹${"%.0f".format(state.totalExpense)}", "TOTAL SPENT")
+                StatCell("$currencySymbol${"%.0f".format(state.totalExpense)}", "TOTAL SPENT")
                 Box(modifier = Modifier.width(1.dp).height(32.dp).background(Border))
                 StatCell("${state.expenses.size}", "EXPENSES")
                 Box(modifier = Modifier.width(1.dp).height(32.dp).background(Border))
                 StatCell(
-                    if (pendingAmt < 0.01) "Settled" else "₹${"%.0f".format(pendingAmt)}",
+                    if (pendingAmt < 0.01) "Settled" else "$currencySymbol${"%.0f".format(pendingAmt)}",
                     "PENDING",
                     if (pendingAmt < 0.01) NeonGreen else AmberAccent
                 )
@@ -258,48 +264,139 @@ fun GroupScreen(
                 ) { page ->
                     when (page) {
                         0 -> ExpensesTab(
-                            expenses             = state.expenses,
-                            members              = state.members,
+                            expenses              = state.expenses,
+                            members               = state.members,
                             splitCountByExpenseId = state.splitCountByExpenseId,
-                            onDelete             = { deleteExpenseTarget = it },
-                            onEdit               = { expense -> onEditExpense(expense.id) }
+                            splitsByExpenseId     = state.splitsByExpenseId,
+                            expenseItemsByExpenseId = state.expenseItemsByExpenseId,
+                            currencySymbol        = currencySymbol,
+                            onDelete              = { deleteExpenseTarget = it },
+                            onEdit                = { expense -> onEditExpense(expense.id) }
                         )
                         1 -> MembersTab(
                             members             = state.members,
                             balances            = state.balances,
                             membersWithExpenses = state.membersWithExpenses,
+                            currencySymbol      = currencySymbol,
                             onAddMember         = { showAddMemberDialog = true },
                             onDeleteMember      = { viewModel.deleteMember(it) }
                         )
                         2 -> BalancesTab(
-                            debts        = state.simplifiedDebts,
-                            expenses     = state.expenses,
-                            members      = state.members,
-                            balances     = state.balances,
-                            settlements  = state.settlements,
+                            debts             = state.simplifiedDebts,
+                            expenses          = state.expenses,
+                            members           = state.members,
+                            balances          = state.balances,
+                            settlements       = state.settlements,
+                            splitsByExpenseId = state.splitsByExpenseId,
+                            currencySymbol    = currencySymbol,
                             onSettle     = { viewModel.recordSettlement(it) },
                             onUndoSettle = { viewModel.deleteSettlement(it) }
                         )
-                        3 -> ChartsTab(state.categorySpending, state.balances, state.expenses.size)
+                        3 -> ChartsTab(state.categorySpending, state.balances, state.expenses.size, currencySymbol)
                         else -> Box(Modifier.fillMaxSize())
                     }
                 }
             }
         }
 
-        // ── FAB — only on Expenses tab ────────────────────────────────────────
+        // ── Speed-dial FAB — only on Expenses tab ────────────────────────────
         if (pagerState.currentPage == 0) {
-            Box(
+            Column(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .navigationBarsPadding()
-                    .padding(end = 22.dp, bottom = 28.dp)
-                    .size(52.dp)
-                    .background(Text1, RoundedCornerShape(16.dp))
-                    .clickable(onClick = onAddExpense),
-                contentAlignment = Alignment.Center
+                    .padding(end = 22.dp, bottom = 28.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add expense", tint = Bg, modifier = Modifier.size(22.dp))
+                // Mini action buttons — visible when expanded
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = fabExpanded,
+                    enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically { it },
+                    exit  = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically { it }
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Scan Bill
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(Surface1, RoundedCornerShape(8.dp))
+                                    .border(1.dp, Border, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text("Scan Bill", color = Text1,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .background(Surface2, RoundedCornerShape(12.dp))
+                                    .border(1.dp, BorderHi, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        fabExpanded = false
+                                        if (state.members.isEmpty()) showNoMembersDialog = true else onScanBill()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Filled.DocumentScanner, contentDescription = "Scan bill",
+                                    tint = NeonGreen, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                        // Add Manually
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .background(Surface1, RoundedCornerShape(8.dp))
+                                    .border(1.dp, Border, RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 10.dp, vertical = 5.dp)
+                            ) {
+                                Text("Add Manually", color = Text1,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold)
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(44.dp)
+                                    .background(Surface2, RoundedCornerShape(12.dp))
+                                    .border(1.dp, BorderHi, RoundedCornerShape(12.dp))
+                                    .clickable {
+                                        fabExpanded = false
+                                        if (state.members.isEmpty()) showNoMembersDialog = true else onAddExpense()
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Filled.Edit, contentDescription = "Add manually",
+                                    tint = Text1, modifier = Modifier.size(20.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Main FAB — toggles speed dial
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .background(Text1, RoundedCornerShape(16.dp))
+                        .clickable { fabExpanded = !fabExpanded },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        if (fabExpanded) Icons.Filled.Close else Icons.Filled.Add,
+                        contentDescription = "Add expense",
+                        tint = Bg,
+                        modifier = Modifier.size(22.dp)
+                    )
+                }
             }
         }
     }
@@ -312,6 +409,36 @@ fun GroupScreen(
             onAdd = { name, email ->
                 viewModel.addMember(name, email, nameToAvatarColor(name))
                 // dialog stays open — user taps Done when finished
+            }
+        )
+    }
+
+    if (showNoMembersDialog) {
+        AlertDialog(
+            onDismissRequest = { showNoMembersDialog = false },
+            containerColor = Surface2,
+            shape = RoundedCornerShape(16.dp),
+            icon = { Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = AmberAccent) },
+            title = {
+                Text("Add a member first", color = Text1, fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Text(
+                    "This group has no members yet. Add at least one member before recording an expense.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Text2
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showNoMembersDialog = false; showAddMemberDialog = true }) {
+                    Text("Add Member", color = NeonGreen, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNoMembersDialog = false }) {
+                    Text("Cancel", color = Text3)
+                }
             }
         )
     }
@@ -338,7 +465,7 @@ fun GroupScreen(
             titleContentColor = Text1,
             textContentColor = Text2,
             title = { Text("Delete expense?") },
-            text = { Text("\"${expense.description}\" (${formatCurrency(expense.amount)}) will be permanently deleted.") },
+            text = { Text("\"${expense.description}\" (${formatCurrency(expense.amount, currencySymbol)}) will be permanently deleted.") },
             confirmButton = {
                 TextButton(onClick = { viewModel.deleteExpense(expense); deleteExpenseTarget = null }) {
                     Text("Delete", color = NeonRed)
@@ -398,6 +525,9 @@ private fun ExpensesTab(
     expenses: List<Expense>,
     members: List<Member>,
     splitCountByExpenseId: Map<String, Int>,
+    splitsByExpenseId: Map<String, List<com.splitexpense.data.db.entity.ExpenseSplit>>,
+    expenseItemsByExpenseId: Map<String, List<com.splitexpense.data.db.entity.ExpenseItem>>,
+    currencySymbol: String,
     onDelete: (Expense) -> Unit,
     onEdit: (Expense) -> Unit
 ) {
@@ -431,12 +561,16 @@ private fun ExpensesTab(
             }
             items(dayExpenses, key = { it.id }) { expense ->
                 ExpenseItem(
-                    expense = expense,
-                    payerName = memberMap[expense.paidById]?.name ?: "Unknown",
-                    memberCount = splitCountByExpenseId[expense.id] ?: members.size,
-                    onDelete = onDelete,
-                    onEdit = onEdit,
-                    fmt = fmt
+                    expense      = expense,
+                    payerName    = memberMap[expense.paidById]?.name ?: "Unknown",
+                    memberCount  = splitCountByExpenseId[expense.id] ?: members.size,
+                    billItems    = expenseItemsByExpenseId[expense.id] ?: emptyList(),
+                    splits       = splitsByExpenseId[expense.id] ?: emptyList(),
+                    memberMap    = memberMap,
+                    currencySymbol = currencySymbol,
+                    onDelete     = onDelete,
+                    onEdit       = onEdit,
+                    fmt          = fmt
                 )
                 Spacer(Modifier.height(8.dp))
             }
@@ -450,89 +584,161 @@ private fun ExpenseItem(
     expense: Expense,
     payerName: String,
     memberCount: Int,
+    billItems: List<com.splitexpense.data.db.entity.ExpenseItem>,
+    splits: List<com.splitexpense.data.db.entity.ExpenseSplit>,
+    memberMap: Map<String, com.splitexpense.data.db.entity.Member>,
+    currencySymbol: String,
     onDelete: (Expense) -> Unit,
     onEdit: (Expense) -> Unit,
     fmt: SimpleDateFormat
 ) {
-    var expanded by remember { mutableStateOf(false) }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var itemsExpanded by remember { mutableStateOf(false) }
     val catColor = expense.category.color()
     val shareAmt = if (memberCount > 0) expense.amount / memberCount else 0.0
+    // Prefer the DB flag (fast, no list traversal); fall back to list check for safety.
+    val hasItems = expense.isItemised || billItems.isNotEmpty()
+    // Normal (non-itemised) expenses can still expand to show the per-member split breakdown.
+    val canExpand = hasItems || splits.isNotEmpty()
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Surface2, RoundedCornerShape(12.dp))
             .border(1.dp, Border, RoundedCornerShape(12.dp))
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Category icon
-        Box(
+        // Main row
+        Row(
             modifier = Modifier
-                .size(38.dp)
-                .background(catColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Icon(expense.category.icon(), contentDescription = null, tint = catColor, modifier = Modifier.size(18.dp))
-        }
+            // Category icon
+            Box(
+                modifier = Modifier
+                    .size(38.dp)
+                    .background(catColor.copy(alpha = 0.12f), RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(expense.category.icon(), contentDescription = null, tint = catColor, modifier = Modifier.size(18.dp))
+            }
 
-        // Info
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                expense.description,
-                style = MaterialTheme.typography.titleSmall,
-                color = Text1,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                "Paid by $payerName · ${expense.category.displayName()}",
-                style = MaterialTheme.typography.bodySmall,
-                color = Text3
-            )
-        }
+            // Info
+            Column(modifier = Modifier.weight(1f)) {
+                Text(expense.description, style = MaterialTheme.typography.titleSmall,
+                    color = Text1, fontWeight = FontWeight.SemiBold, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis)
+                Text("Paid by $payerName · ${expense.category.displayName()}",
+                    style = MaterialTheme.typography.bodySmall, color = Text3)
+            }
 
-        // Amount + menu
-        Column(horizontalAlignment = Alignment.End) {
-            Text(
-                formatCurrency(expense.amount),
-                style = MaterialTheme.typography.titleSmall,
-                color = Text1,
-                fontWeight = FontWeight.Bold
-            )
-            if (memberCount > 1) {
-                Text(
-                    "${formatCurrency(shareAmt)}/person",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Text3
+            // Amount
+            Column(horizontalAlignment = Alignment.End) {
+                Text(formatCurrency(expense.amount, currencySymbol), style = MaterialTheme.typography.titleSmall,
+                    color = Text1, fontWeight = FontWeight.Bold)
+                if (memberCount > 1 && !hasItems) {
+                    Text("${formatCurrency(shareAmt, currencySymbol)}/person",
+                        style = MaterialTheme.typography.labelSmall, color = Text3)
+                }
+            }
+
+            // Expand toggle — bill items for itemised expenses, split breakdown otherwise
+            if (canExpand) {
+                Icon(
+                    if (itemsExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = "Toggle details",
+                    tint = Text3,
+                    modifier = Modifier.size(18.dp).clickable { itemsExpanded = !itemsExpanded }
                 )
+            }
+
+            // 3-dot menu
+            Box {
+                Icon(Icons.Filled.MoreVert, contentDescription = null,
+                    tint = Text3,
+                    modifier = Modifier.size(16.dp).clickable { menuExpanded = true })
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier.background(Surface2).border(1.dp, Border, RoundedCornerShape(8.dp))
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Edit", color = Text1, style = MaterialTheme.typography.bodySmall) },
+                        onClick = { menuExpanded = false; onEdit(expense) },
+                        leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null, tint = Text2, modifier = Modifier.size(14.dp)) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete", color = NeonRed, style = MaterialTheme.typography.bodySmall) },
+                        onClick = { menuExpanded = false; onDelete(expense) },
+                        leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = NeonRed, modifier = Modifier.size(14.dp)) }
+                    )
+                }
             }
         }
 
-        Box {
-            Icon(
-                Icons.Filled.MoreVert,
-                contentDescription = null,
-                tint = Text3,
-                modifier = Modifier.size(16.dp).clickable { expanded = true }
-            )
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-                modifier = Modifier.background(Surface2).border(1.dp, Border, RoundedCornerShape(8.dp))
+        // Expandable details — bill items for itemised expenses, split breakdown otherwise
+        if (canExpand && itemsExpanded) {
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Border))
+            Column(
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                DropdownMenuItem(
-                    text = { Text("Edit", color = Text1, style = MaterialTheme.typography.bodySmall) },
-                    onClick = { expanded = false; onEdit(expense) },
-                    leadingIcon = { Icon(Icons.Filled.Edit, contentDescription = null, tint = Text2, modifier = Modifier.size(14.dp)) }
-                )
-                DropdownMenuItem(
-                    text = { Text("Delete", color = NeonRed, style = MaterialTheme.typography.bodySmall) },
-                    onClick = { expanded = false; onDelete(expense) },
-                    leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null, tint = NeonRed, modifier = Modifier.size(14.dp)) }
-                )
+                if (hasItems) {
+                    billItems.forEach { item ->
+                        val assignedIds = runCatching {
+                            val arr = org.json.JSONArray(item.assignedMemberIds)
+                            (0 until arr.length()).map { arr.getString(it) }
+                        }.getOrDefault(emptyList())
+
+                        val assignedNames = if (assignedIds.isEmpty()) "Everyone"
+                        else assignedIds.mapNotNull { memberMap[it]?.name }.joinToString(", ")
+                            .ifBlank { "Everyone" }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(item.name, color = Text2,
+                                    style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis)
+                                Text(assignedNames, color = Text3,
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(formatCurrency(item.amount, currencySymbol), color = Text2,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium)
+                        }
+                    }
+                } else {
+                    // Per-member split breakdown for a standard (non-itemised) expense.
+                    // Percentage is always recalculated from amount/expense.amount — the
+                    // stored ExpenseSplit.percentage field is only meaningful for PERCENTAGE splits.
+                    splits.sortedByDescending { it.amount }.forEach { split ->
+                        val name = memberMap[split.memberId]?.name ?: "Unknown"
+                        val pct  = if (expense.amount > 0.01) split.amount / expense.amount * 100 else 0.0
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(name, color = Text2,
+                                    style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis)
+                                Text("${"%.1f".format(pct)}% share", color = Text3,
+                                    style = MaterialTheme.typography.labelSmall)
+                            }
+                            Text(formatCurrency(split.amount, currencySymbol), color = Text2,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontWeight = FontWeight.Medium)
+                        }
+                    }
+                }
             }
         }
     }
@@ -545,6 +751,7 @@ private fun MembersTab(
     members: List<Member>,
     balances: List<MemberBalance>,
     membersWithExpenses: Set<String>,
+    currencySymbol: String,
     onAddMember: () -> Unit,
     onDeleteMember: (Member) -> Unit
 ) {
@@ -587,6 +794,7 @@ private fun MembersTab(
                         member          = member,
                         balance         = balanceMap[member.id]?.netBalance ?: 0.0,
                         hasExpenses     = member.id in membersWithExpenses,
+                        currencySymbol  = currencySymbol,
                         onDeleteRequest = { deletePending = member }
                     )
                 }
@@ -617,7 +825,7 @@ private fun MembersTab(
 }
 
 @Composable
-private fun MemberItem(member: Member, balance: Double, hasExpenses: Boolean, onDeleteRequest: () -> Unit) {
+private fun MemberItem(member: Member, balance: Double, hasExpenses: Boolean, currencySymbol: String, onDeleteRequest: () -> Unit) {
     val initials = member.name.split(" ").take(2).joinToString("") { it.firstOrNull()?.uppercase() ?: "" }
     val balColor = when {
         balance > 0.01  -> NeonGreen
@@ -625,8 +833,8 @@ private fun MemberItem(member: Member, balance: Double, hasExpenses: Boolean, on
         else            -> Text3
     }
     val balText = when {
-        balance > 0.01  -> "+${formatCurrency(balance)}"
-        balance < -0.01 -> formatCurrency(balance)
+        balance > 0.01  -> "+${formatCurrency(balance, currencySymbol)}"
+        balance < -0.01 -> formatCurrency(balance, currencySymbol)
         else            -> "Settled"
     }
 
@@ -691,66 +899,112 @@ private fun MemberTotalSpendItem(
     member: Member,
     totalPaid: Double,
     effectiveCost: Double,
-    netBalance: Double
+    netBalance: Double,
+    breakdown: List<Pair<String, Double>>,
+    currencySymbol: String
 ) {
+    var expanded by remember { mutableStateOf(false) }
     val isOwed = netBalance > 0.01
     val owes   = netBalance < -0.01
 
     // e.g. "Paid ₹1,000 − gets back ₹300" or "Paid ₹200 + owes ₹500"
     val formula = when {
-        isOwed -> "Paid ${formatCurrency(totalPaid)} − gets back ${formatCurrency(netBalance)}"
-        owes   -> "Paid ${formatCurrency(totalPaid)} + owes ${formatCurrency(-netBalance)}"
-        else   -> "Paid ${formatCurrency(totalPaid)}"
+        isOwed -> "Paid ${formatCurrency(totalPaid, currencySymbol)} − gets back ${formatCurrency(netBalance, currencySymbol)}"
+        owes   -> "Paid ${formatCurrency(totalPaid, currencySymbol)} + owes ${formatCurrency(-netBalance, currencySymbol)}"
+        else   -> "Paid ${formatCurrency(totalPaid, currencySymbol)}"
     }
 
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Surface2, RoundedCornerShape(12.dp))
             .border(1.dp, Border, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // Avatar
-        val initials = member.name.split(" ").take(2)
-            .joinToString("") { it.firstOrNull()?.uppercase() ?: "" }
-        Box(
+        Row(
             modifier = Modifier
-                .size(34.dp)
-                .background(Color(member.avatarColor), androidx.compose.foundation.shape.CircleShape)
-                .border(1.dp, Border, androidx.compose.foundation.shape.CircleShape),
-            contentAlignment = Alignment.Center
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            // Avatar
+            val initials = member.name.split(" ").take(2)
+                .joinToString("") { it.firstOrNull()?.uppercase() ?: "" }
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    .background(Color(member.avatarColor), androidx.compose.foundation.shape.CircleShape)
+                    .border(1.dp, Border, androidx.compose.foundation.shape.CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    initials,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+
+            // Name + formula breakdown
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    member.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Text1,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    formula,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = Text3
+                )
+            }
+
+            // Effective cost — how much this trip actually cost them (settlement-independent)
             Text(
-                initials,
-                style = MaterialTheme.typography.labelSmall,
-                color = Color.White,
-                fontWeight = FontWeight.Bold
+                formatCurrency(effectiveCost, currencySymbol),
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                color = AmberAccent
             )
+
+            // Expand toggle — per-expense breakdown of this member's share
+            if (breakdown.isNotEmpty()) {
+                Icon(
+                    if (expanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = "Toggle breakdown",
+                    tint = Text3,
+                    modifier = Modifier.size(18.dp).clickable { expanded = !expanded }
+                )
+            }
         }
 
-        // Name + formula breakdown
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                member.name,
-                style = MaterialTheme.typography.bodySmall,
-                color = Text1,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                formula,
-                style = MaterialTheme.typography.labelSmall,
-                color = Text3
-            )
+        // Expandable breakdown — same visual pattern as itemised-expense bill items
+        if (expanded && breakdown.isNotEmpty()) {
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Border))
+            Column(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                breakdown.forEach { (description, amount) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            description, color = Text2,
+                            style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            formatCurrency(amount, currencySymbol), color = Text2,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
         }
-
-        // Effective cost — how much this trip actually cost them
-        Text(
-            formatCurrency(effectiveCost),
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-            color = AmberAccent
-        )
     }
 }
 
@@ -828,6 +1082,8 @@ private fun BalancesTab(
     members: List<Member>,
     balances: List<MemberBalance>,
     settlements: List<Settlement>,
+    splitsByExpenseId: Map<String, List<com.splitexpense.data.db.entity.ExpenseSplit>>,
+    currencySymbol: String,
     onSettle: (DebtTransaction) -> Unit,
     onUndoSettle: (Settlement) -> Unit
 ) {
@@ -841,13 +1097,30 @@ private fun BalancesTab(
         val max   = spend.maxOfOrNull { it.second }?.coerceAtLeast(1.0) ?: 1.0
         Triple(spend, total, max)
     }
-    // Per-member effective cost = paid − netBalance  (= their actual share of expenses)
-    // Formula: if they overpaid → paid − gets_back; if they underpaid → paid + owes
-    val memberTotalSpend = remember(memberSpend, balances) {
-        val netMap = balances.associate { it.memberId to it.netBalance }
+    // Per-member "cost of the trip" breakdown — built directly from ExpenseSplit amounts so
+    // it stays correct regardless of settlement status. Do NOT derive this from
+    // `paid - netBalance`: netBalance includes settlement adjustments, so that formula would
+    // make a member's effective cost shift every time a debt gets settled, even though their
+    // actual share of the group's expenses never changed. (Same invariant as the PDF's
+    // "Share" column — see PdfExporter / CLAUDE.md.)
+    val expenseDescById = remember(expenses) { expenses.associateBy({ it.id }, { it.description }) }
+    val memberBreakdown = remember(splitsByExpenseId, expenseDescById) {
+        val map = mutableMapOf<String, MutableList<Pair<String, Double>>>()
+        splitsByExpenseId.forEach { (expenseId, splitList) ->
+            val desc = expenseDescById[expenseId] ?: "Unknown"
+            splitList.forEach { split ->
+                map.getOrPut(split.memberId) { mutableListOf() }.add(desc to split.amount)
+            }
+        }
+        map
+    }
+    val memberShareMap = remember(memberBreakdown) {
+        memberBreakdown.mapValues { (_, list) -> list.sumOf { it.second } }
+    }
+    // Per-member effective cost = sum of their ExpenseSplit amounts (settlement-independent).
+    val memberTotalSpend = remember(memberSpend, memberShareMap) {
         memberSpend.map { (member, paid) ->
-            val net          = netMap[member.id] ?: 0.0
-            val effectiveCost = paid - net
+            val effectiveCost = memberShareMap[member.id] ?: 0.0
             Triple(member, paid, effectiveCost)
         }.sortedByDescending { it.third }
     }
@@ -871,7 +1144,14 @@ private fun BalancesTab(
             }
             items(memberTotalSpend, key = { "ts_${it.first.id}" }) { (member, paid, effectiveCost) ->
                 val net = balances.find { it.memberId == member.id }?.netBalance ?: 0.0
-                MemberTotalSpendItem(member = member, totalPaid = paid, effectiveCost = effectiveCost, netBalance = net)
+                MemberTotalSpendItem(
+                    member        = member,
+                    totalPaid     = paid,
+                    effectiveCost = effectiveCost,
+                    netBalance    = net,
+                    breakdown     = memberBreakdown[member.id]?.sortedByDescending { it.second } ?: emptyList(),
+                    currencySymbol = currencySymbol
+                )
             }
             item(key = "total_spend_divider") {
                 Spacer(Modifier.height(16.dp))
@@ -897,7 +1177,8 @@ private fun BalancesTab(
                     member   = member,
                     spent    = spent,
                     total    = totalSpent,
-                    maxSpend = maxSpend
+                    maxSpend = maxSpend,
+                    currencySymbol = currencySymbol
                 )
             }
             item(key = "spend_divider") {
@@ -971,7 +1252,7 @@ private fun BalancesTab(
             }
         } else {
             items(debts, key = { "${it.fromId}_${it.toId}" }) { debt ->
-                DebtItem(debt = debt, onSettle = { settleTarget = debt })
+                DebtItem(debt = debt, currencySymbol = currencySymbol, onSettle = { settleTarget = debt })
             }
         }
 
@@ -1004,7 +1285,7 @@ private fun BalancesTab(
                 Spacer(Modifier.height(6.dp))
             }
             items(settlements, key = { it.id }) { settlement ->
-                SettledItem(settlement = settlement, onUndo = { onUndoSettle(settlement) })
+                SettledItem(settlement = settlement, currencySymbol = currencySymbol, onUndo = { onUndoSettle(settlement) })
             }
         }
 
@@ -1021,7 +1302,7 @@ private fun BalancesTab(
             title = { Text("Mark as settled?") },
             text = {
                 Text(
-                    "${debt.fromName} paid ${debt.toName} ${formatCurrency(debt.amount)}.\n" +
+                    "${debt.fromName} paid ${debt.toName} ${formatCurrency(debt.amount, currencySymbol)}.\n" +
                     "This will record the payment and clear the debt."
                 )
             },
@@ -1042,7 +1323,8 @@ private fun MemberSpendItem(
     member: Member,
     spent: Double,
     total: Double,
-    maxSpend: Double
+    maxSpend: Double,
+    currencySymbol: String
 ) {
     val initials = member.name
         .split(" ")
@@ -1092,7 +1374,7 @@ private fun MemberSpendItem(
                     fontWeight = FontWeight.SemiBold
                 )
                 Text(
-                    formatCurrency(spent),
+                    formatCurrency(spent, currencySymbol),
                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                     color = if (spent > 0.01) NeonGreen else Text3
                 )
@@ -1127,7 +1409,7 @@ private fun MemberSpendItem(
 }
 
 @Composable
-private fun DebtItem(debt: DebtTransaction, onSettle: () -> Unit) {
+private fun DebtItem(debt: DebtTransaction, currencySymbol: String, onSettle: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1161,7 +1443,7 @@ private fun DebtItem(debt: DebtTransaction, onSettle: () -> Unit) {
                 Text(debt.toName, style = MaterialTheme.typography.bodySmall, color = NeonGreen, fontWeight = FontWeight.SemiBold)
             }
             Text(
-                formatCurrency(debt.amount),
+                formatCurrency(debt.amount, currencySymbol),
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                 color = NeonRed
             )
@@ -1197,7 +1479,7 @@ private fun DebtItem(debt: DebtTransaction, onSettle: () -> Unit) {
 }
 
 @Composable
-private fun SettledItem(settlement: Settlement, onUndo: () -> Unit) {
+private fun SettledItem(settlement: Settlement, currencySymbol: String, onUndo: () -> Unit) {
     val fmt = remember { java.text.SimpleDateFormat("dd MMM", java.util.Locale.getDefault()) }
     Row(
         modifier = Modifier
@@ -1242,7 +1524,7 @@ private fun SettledItem(settlement: Settlement, onUndo: () -> Unit) {
                 )
             }
             Text(
-                "${formatCurrency(settlement.amount)} · ${fmt.format(java.util.Date(settlement.date))}",
+                "${formatCurrency(settlement.amount, currencySymbol)} · ${fmt.format(java.util.Date(settlement.date))}",
                 style = MaterialTheme.typography.labelSmall,
                 color = Text3
             )
@@ -1267,7 +1549,8 @@ private fun SettledItem(settlement: Settlement, onUndo: () -> Unit) {
 private fun ChartsTab(
     categorySpending: Map<Category, Double>,
     balances: List<MemberBalance>,
-    expenseCount: Int
+    expenseCount: Int,
+    currencySymbol: String
 ) {
     // No expenses — show an informative placeholder
     if (categorySpending.isEmpty()) {
@@ -1295,7 +1578,7 @@ private fun ChartsTab(
         ChartCard("SPENDING BY CATEGORY") {
             val entries = categorySpending.entries.sortedByDescending { it.value }
                 .map { (cat, amt) -> ChartEntry(cat.displayName(), amt.toFloat(), cat.color()) }
-            CategoryChart(entries = entries, modifier = Modifier.fillMaxWidth())
+            CategoryChart(entries = entries, modifier = Modifier.fillMaxWidth(), currencySymbol = currencySymbol)
         }
 
         // Member balance bar chart — only when balances are non-trivial
@@ -1311,7 +1594,7 @@ private fun ChartsTab(
                             if (b.netBalance >= 0) NeonGreen else NeonRed
                         )
                     }
-                HorizontalBarChart(entries = entries, modifier = Modifier.fillMaxWidth())
+                HorizontalBarChart(entries = entries, modifier = Modifier.fillMaxWidth(), currencySymbol = currencySymbol)
             }
         }
 
@@ -1527,6 +1810,8 @@ private fun EditGroupDialog(
                     colors = darkFieldColors(),
                     modifier = Modifier.fillMaxWidth()
                 )
+                // Currency is no longer edited per group — it's a single app-wide setting
+                // (Home screen overflow menu → Currency) so totals stay consistent everywhere.
             }
         },
         confirmButton = {

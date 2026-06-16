@@ -9,5 +9,7 @@ data class Group(
     val name: String,
     val description: String = "",
     val emoji: String = "💰",
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    /** ISO-ish currency code, e.g. "INR", "USD". See util/Currencies.kt for the supported list. */
+    val currencyCode: String = "INR"
 )

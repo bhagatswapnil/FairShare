@@ -1,5 +1,8 @@
 package com.splitexpense.ui.screens.home
 
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -17,6 +20,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -26,8 +30,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.splitexpense.data.db.entity.Group
 import com.splitexpense.data.db.entity.Member
+import com.splitexpense.ui.components.ApiKeyDialog
 import com.splitexpense.ui.theme.*
-import java.util.Locale
+import com.splitexpense.util.ApiKeyManager
+import com.splitexpense.util.SUPPORTED_CURRENCIES
 
 val groupEmojis = listOf("💰","✈️","🏠","🍕","🎉","🛒","🏖️","🎸","🍺","🏋️","🎬","🚗")
 
@@ -37,9 +43,38 @@ fun HomeScreen(
     onGroupClick: (String) -> Unit,
     viewModel: HomeViewModel = viewModel(factory = HomeViewModel.Factory)
 ) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
-    var searchQuery by remember { mutableStateOf("") }
-    var showCreateDialog by remember { mutableStateOf(false) }
+    val state               by viewModel.uiState.collectAsStateWithLifecycle()
+    val backupRestoreState  by viewModel.backupRestoreState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val apiKeyManager = remember { ApiKeyManager(context) }
+
+    var searchQuery         by remember { mutableStateOf("") }
+    var showCreateDialog    by remember { mutableStateOf(false) }
+    var showApiKeyDialog    by remember { mutableStateOf(false) }
+    var showCurrencyDialog  by remember { mutableStateOf(false) }
+    var showOverflowMenu    by remember { mutableStateOf(false) }
+    // URI chosen by the file picker — held until the user confirms the restore dialog.
+    var pendingRestoreUri   by remember { mutableStateOf<android.net.Uri?>(null) }
+
+    // ── File picker for restore ────────────────────────────────────────────────
+    val restoreLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri -> if (uri != null) pendingRestoreUri = uri }
+
+    // ── Handle terminal backup/restore states ──────────────────────────────────
+    LaunchedEffect(backupRestoreState) {
+        when (val s = backupRestoreState) {
+            is BackupRestoreState.BackupReady -> {
+                Toast.makeText(context, "Backup saved to ${s.savedPath}", Toast.LENGTH_LONG).show()
+                viewModel.resetBackupRestoreState()
+            }
+            is BackupRestoreState.RestoreComplete -> {
+                Toast.makeText(context, "Backup restored successfully!", Toast.LENGTH_SHORT).show()
+                viewModel.resetBackupRestoreState()
+            }
+            else -> Unit
+        }
+    }
 
     val filtered = state.groups.filter {
         it.name.contains(searchQuery, ignoreCase = true) ||
@@ -78,8 +113,120 @@ fun HomeScreen(
                             letterSpacing = 1.sp
                         )
                     }
-                    IconBtn(onClick = { showCreateDialog = true }) {
-                        Icon(Icons.Filled.Add, contentDescription = "New group", tint = Text2, modifier = Modifier.size(20.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // ── Overflow menu (⋮) ─────────────────────────────────
+                        Box {
+                            IconBtn(onClick = { showOverflowMenu = true }) {
+                                Icon(
+                                    Icons.Filled.MoreVert,
+                                    contentDescription = "More options",
+                                    tint = Text2,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false },
+                                modifier = Modifier
+                                    .background(Surface2)
+                                    .border(1.dp, Border, RoundedCornerShape(8.dp))
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Gemini API Key",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Text1
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Key,
+                                            contentDescription = null,
+                                            tint = Text2,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    onClick = { showOverflowMenu = false; showApiKeyDialog = true },
+                                    colors = MenuDefaults.itemColors(
+                                        textColor        = Text1,
+                                        leadingIconColor = Text2
+                                    )
+                                )
+                                HorizontalDivider(color = Border, thickness = 0.5.dp)
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Currency",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Text1
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Filled.AttachMoney,
+                                            contentDescription = null,
+                                            tint = Text2,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    onClick = { showOverflowMenu = false; showCurrencyDialog = true },
+                                    colors = MenuDefaults.itemColors(
+                                        textColor        = Text1,
+                                        leadingIconColor = Text2
+                                    )
+                                )
+                                HorizontalDivider(color = Border, thickness = 0.5.dp)
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Backup Data",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Text1
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Filled.Save,
+                                            contentDescription = null,
+                                            tint = Text2,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    onClick = { showOverflowMenu = false; viewModel.createBackup() },
+                                    colors = MenuDefaults.itemColors(
+                                        textColor        = Text1,
+                                        leadingIconColor = Text2
+                                    )
+                                )
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            "Restore Backup",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Text1
+                                        )
+                                    },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.Filled.FolderOpen,
+                                            contentDescription = null,
+                                            tint = Text2,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    },
+                                    onClick = {
+                                        showOverflowMenu = false
+                                        restoreLauncher.launch("*/*")
+                                    },
+                                    colors = MenuDefaults.itemColors(
+                                        textColor        = Text1,
+                                        leadingIconColor = Text2
+                                    )
+                                )
+                            }
+                        }
+
                     }
                 }
 
@@ -125,10 +272,14 @@ fun HomeScreen(
                 ) {
                     // ── Summary Banner ────────────────────────────────────────
                     item {
+                        // Currency is a single app-wide setting (see AppSettingsManager),
+                        // so summing across all groups is always safe — every group's
+                        // total is denominated in the same currency.
                         SummaryBanner(
-                            groupCount   = state.groups.size,
-                            totalExpense = state.groupTotals.values.sum(),
-                            totalPending = state.groupPendingAmounts.values.sum()
+                            groupCount     = state.groups.size,
+                            totalExpense   = state.groupTotals.values.sum(),
+                            totalPending   = state.groupPendingAmounts.values.sum(),
+                            currencySymbol = state.currencySymbol
                         )
                         Spacer(Modifier.height(18.dp))
                     }
@@ -170,12 +321,13 @@ fun HomeScreen(
                             val pending = state.groupPendingAmounts[group.id] ?: 0.0
                             val settled = state.groupSettledAmounts[group.id] ?: 0.0
                             GroupCard(
-                                group   = group,
-                                total   = total,
-                                pending = pending,
-                                settled = settled,
-                                members = state.groupMembers[group.id] ?: emptyList(),
-                                onClick = { onGroupClick(group.id) }
+                                group          = group,
+                                total          = total,
+                                pending        = pending,
+                                settled        = settled,
+                                members        = state.groupMembers[group.id] ?: emptyList(),
+                                currencySymbol = state.currencySymbol,
+                                onClick        = { onGroupClick(group.id) }
                             )
                             Spacer(Modifier.height(10.dp))
                         }
@@ -207,7 +359,23 @@ fun HomeScreen(
                 }
             }
         }
+
+        // ── FAB ──────────────────────────────────────────────────────────────
+        FloatingActionButton(
+            onClick          = { showCreateDialog = true },
+            modifier         = Modifier
+                .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
+                .padding(end = 24.dp, bottom = 24.dp),
+            containerColor   = NeonGreen,
+            contentColor     = Bg,
+            shape            = RoundedCornerShape(16.dp)
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = "New group", modifier = Modifier.size(24.dp))
+        }
     }
+
+    // ── Dialogs ───────────────────────────────────────────────────────────────
 
     if (showCreateDialog) {
         CreateGroupDialog(
@@ -219,10 +387,122 @@ fun HomeScreen(
         )
     }
 
+    if (showCurrencyDialog) {
+        CurrencyPickerDialog(
+            currentCode = state.currencyCode,
+            onSave = { code ->
+                viewModel.setCurrencyCode(code)
+                showCurrencyDialog = false
+            },
+            onDismiss = { showCurrencyDialog = false }
+        )
+    }
+
+    if (showApiKeyDialog) {
+        ApiKeyDialog(
+            currentKey = apiKeyManager.getKey(),
+            onSave     = { key ->
+                apiKeyManager.setKey(key)
+                showApiKeyDialog = false
+            },
+            onDismiss = { showApiKeyDialog = false }
+        )
+    }
+
+    // Restore confirmation — shown after the user picks a file
+    if (pendingRestoreUri != null) {
+        AlertDialog(
+            onDismissRequest = { pendingRestoreUri = null },
+            containerColor   = Surface2,
+            titleContentColor = Text1,
+            textContentColor  = Text2,
+            icon = {
+                Icon(
+                    Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint   = NeonRed,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = { Text("Restore Backup?") },
+            text  = {
+                Text(
+                    "This will permanently replace ALL current data with the contents of the " +
+                    "selected backup file. This cannot be undone.",
+                    style = MaterialTheme.typography.bodySmall
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.restoreBackup(pendingRestoreUri!!)
+                        pendingRestoreUri = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NeonRed, contentColor = Color.White)
+                ) { Text("Restore", fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestoreUri = null }) {
+                    Text("Cancel", color = Text3)
+                }
+            }
+        )
+    }
+
+    // Backup/Restore in-progress spinner
+    if (backupRestoreState is BackupRestoreState.InProgress) {
+        AlertDialog(
+            onDismissRequest = { /* non-dismissable while working */ },
+            containerColor   = Surface2,
+            titleContentColor = Text1,
+            textContentColor  = Text2,
+            title = { Text("Working…") },
+            text  = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    CircularProgressIndicator(
+                        color       = NeonGreen,
+                        strokeWidth = 2.dp,
+                        modifier    = Modifier.size(22.dp)
+                    )
+                    Text("Please wait", style = MaterialTheme.typography.bodySmall, color = Text2)
+                }
+            },
+            confirmButton = {}
+        )
+    }
+
+    // Backup/Restore error
+    if (backupRestoreState is BackupRestoreState.Error) {
+        val msg = (backupRestoreState as BackupRestoreState.Error).message
+        AlertDialog(
+            onDismissRequest = { viewModel.resetBackupRestoreState() },
+            containerColor   = Surface2,
+            titleContentColor = Text1,
+            textContentColor  = Text2,
+            icon = {
+                Icon(
+                    Icons.Filled.ErrorOutline,
+                    contentDescription = null,
+                    tint   = NeonRed,
+                    modifier = Modifier.size(28.dp)
+                )
+            },
+            title = { Text("Error") },
+            text  = { Text(msg, style = MaterialTheme.typography.bodySmall) },
+            confirmButton = {
+                TextButton(onClick = { viewModel.resetBackupRestoreState() }) {
+                    Text("OK", color = NeonGreen, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
 }
 
 @Composable
-private fun SummaryBanner(groupCount: Int, totalExpense: Double, totalPending: Double) {
+private fun SummaryBanner(groupCount: Int, totalExpense: Double, totalPending: Double, currencySymbol: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -248,7 +528,7 @@ private fun SummaryBanner(groupCount: Int, totalExpense: Double, totalPending: D
         // Total spent
         Column {
             Text(
-                formatAmount(totalExpense),
+                formatAmount(totalExpense, currencySymbol),
                 style = MaterialTheme.typography.titleLarge,
                 color = Text1,
                 fontWeight = FontWeight.Bold
@@ -261,7 +541,7 @@ private fun SummaryBanner(groupCount: Int, totalExpense: Double, totalPending: D
         // Pending (amber)
         Column {
             Text(
-                formatAmount(totalPending),
+                formatAmount(totalPending, currencySymbol),
                 style = MaterialTheme.typography.titleLarge,
                 color = AmberAccent,
                 fontWeight = FontWeight.Bold
@@ -289,9 +569,11 @@ private fun GroupCard(
     pending: Double,
     settled: Double,
     members: List<Member>,
+    currencySymbol: String,
     onClick: () -> Unit
 ) {
 
+    val symbol = currencySymbol
     val hasExpenses = total > 0.01
     // Settled % only meaningful once there have been expenses and some debt exists
     val totalDebt   = settled + pending
@@ -364,7 +646,7 @@ private fun GroupCard(
                 if (total > 0) {
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            formatAmount(total),
+                            formatAmount(total, symbol),
                             style = MaterialTheme.typography.titleMedium,
                             color = Text1,
                             fontWeight = FontWeight.Bold
@@ -455,7 +737,7 @@ private fun GroupCard(
                             .padding(horizontal = 10.dp, vertical = 4.dp)
                     ) {
                         Text(
-                            "${formatAmount(pending)} pending",
+                            "${formatAmount(pending, symbol)} pending",
                             style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                             color = AmberAccent
                         )
@@ -496,11 +778,16 @@ private fun GroupCard(
     }
 }
 
-/** Formats a monetary amount as ₹82k / ₹3.2k / ₹250. */
-private fun formatAmount(amount: Double): String = when {
-    amount >= 1_00_000 -> "₹${"%.1f".format(amount / 1_00_000)}L"
-    amount >= 1_000    -> "₹${"%.1f".format(amount / 1_000)}k"
-    else               -> "₹${"%.0f".format(amount)}"
+/**
+ * Formats a monetary amount as ₹82k / ₹3.2k / ₹250 using [symbol] (defaults to ₹).
+ * Currency is a single app-wide setting (see [com.splitexpense.util.AppSettingsManager]),
+ * so every caller — per-group cards and the aggregate summary banner alike — passes the
+ * same [HomeUiState.currencySymbol].
+ */
+private fun formatAmount(amount: Double, symbol: String = "₹"): String = when {
+    amount >= 1_00_000 -> "$symbol${"%.1f".format(amount / 1_00_000)}L"
+    amount >= 1_000    -> "$symbol${"%.1f".format(amount / 1_000)}k"
+    else               -> "$symbol${"%.0f".format(amount)}"
 }
 
 @Composable
@@ -565,6 +852,77 @@ private fun CreateGroupDialog(onDismiss: () -> Unit, onCreate: (String, String, 
                 enabled = name.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Bg)
             ) { Text("Create", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = Text2) }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CurrencySelector(selected: String, onSelect: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
+    val option = SUPPORTED_CURRENCIES.find { it.code == selected } ?: SUPPORTED_CURRENCIES.first()
+
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = "${option.symbol}  ${option.code} — ${option.label}",
+            onValueChange = {},
+            readOnly = true,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            colors = darkFieldColors(),
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().menuAnchor()
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(Surface2)
+        ) {
+            SUPPORTED_CURRENCIES.forEach { c ->
+                DropdownMenuItem(
+                    text = {
+                        Text("${c.symbol}  ${c.code} — ${c.label}", style = MaterialTheme.typography.bodySmall, color = Text1)
+                    },
+                    onClick = { onSelect(c.code); expanded = false }
+                )
+            }
+        }
+    }
+}
+
+/**
+ * App-wide currency picker, reached from the Home screen's overflow menu. There is
+ * deliberately no per-group equivalent — currency is a single [AppSettingsManager]
+ * setting shared by every group, which is what keeps the Home summary banner (and every
+ * other aggregate total) consistent regardless of which groups exist.
+ */
+@Composable
+private fun CurrencyPickerDialog(currentCode: String, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    var selected by remember(currentCode) { mutableStateOf(currentCode) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Surface2,
+        titleContentColor = Text1,
+        textContentColor = Text2,
+        title = { Text("App Currency") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Applies to every group — totals, charts and PDF exports.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Text3
+                )
+                CurrencySelector(selected = selected, onSelect = { selected = it })
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onSave(selected) },
+                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Bg)
+            ) { Text("Save", fontWeight = FontWeight.Bold) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = Text2) }

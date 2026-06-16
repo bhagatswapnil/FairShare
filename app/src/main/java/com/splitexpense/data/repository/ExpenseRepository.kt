@@ -8,7 +8,18 @@ import com.splitexpense.data.model.MemberBalance
 import kotlin.math.round
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import org.json.JSONArray
 import java.util.UUID
+
+/** Describes one line item from a scanned bill for use with [addExpenseWithItems]. */
+data class BillItemData(
+    /** Stable row ID — preserved from the DB for existing items, fresh UUID for new ones. */
+    val id: String = UUID.randomUUID().toString(),
+    val name: String,
+    val amount: Double,
+    /** Member IDs assigned to this item. Empty = split among all [allMemberIds]. */
+    val assignedMemberIds: List<String>
+)
 
 class ExpenseRepository(private val db: AppDatabase) {
 
@@ -33,13 +44,14 @@ class ExpenseRepository(private val db: AppDatabase) {
         db.settlementDao().getGroupSettledAmounts()
             .map { list -> list.associate { it.groupId to it.settled } }
 
-    suspend fun createGroup(name: String, description: String, emoji: String) {
+    suspend fun createGroup(name: String, description: String, emoji: String, currencyCode: String = "INR") {
         db.groupDao().insertGroup(
             Group(
-                id          = UUID.randomUUID().toString(),
-                name        = name,
-                description = description,
-                emoji       = emoji
+                id           = UUID.randomUUID().toString(),
+                name         = name,
+                description  = description,
+                emoji        = emoji,
+                currencyCode = currencyCode
             )
         )
     }
@@ -122,7 +134,9 @@ class ExpenseRepository(private val db: AppDatabase) {
 
     suspend fun updateExpense(expense: Expense, splits: List<Pair<String, Double>>) {
         db.withTransaction {
-            db.expenseDao().updateExpense(expense)
+            // Always save with isItemised = false on the standard path so that
+            // converting an itemised expense back to a regular one is fully clean.
+            db.expenseDao().updateExpense(expense.copy(isItemised = false))
             db.expenseSplitDao().deleteSplitsForExpense(expense.id)
             db.expenseSplitDao().insertSplits(
                 splits.map { (memberId, splitAmount) ->
@@ -136,6 +150,8 @@ class ExpenseRepository(private val db: AppDatabase) {
                     )
                 }
             )
+            // Remove any leftover items from a previous itemised state.
+            db.expenseItemDao().deleteItemsForExpense(expense.id)
         }
     }
 
@@ -144,6 +160,140 @@ class ExpenseRepository(private val db: AppDatabase) {
         db.withTransaction {
             db.expenseSplitDao().deleteSplitsForExpense(expense.id)
             db.expenseDao().deleteExpense(expense)
+        }
+    }
+
+    // ─── Expense Items ─────────────────────────────────────────────────────────
+
+    fun getItemsForGroup(groupId: String): Flow<List<ExpenseItem>> =
+        db.expenseItemDao().getItemsForGroup(groupId)
+
+    suspend fun getItemsForExpenseOnce(expenseId: String): List<ExpenseItem> =
+        db.expenseItemDao().getItemsForExpenseOnce(expenseId)
+
+    suspend fun getItemsForGroupOnce(groupId: String): List<ExpenseItem> =
+        db.expenseItemDao().getItemsForGroupOnce(groupId)
+
+    /**
+     * Creates an expense with itemized line items (from bill scanning).
+     * Splits are derived from item assignments; items are stored for display.
+     */
+    suspend fun addExpenseWithItems(
+        groupId: String,
+        description: String,
+        paidById: String,
+        category: Category,
+        items: List<BillItemData>,
+        allMemberIds: List<String>
+    ) {
+        val expenseId = UUID.randomUUID().toString()
+        val totalAmount = items.sumOf { it.amount }
+
+        // Accumulate unrounded per-member totals; round only at DB write time so that
+        // each member's total is rounded once (not per-item), keeping sum(splits)
+        // as close to expense.amount as floating-point allows.
+        val memberTotals = mutableMapOf<String, Double>()
+        items.forEach { item ->
+            val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+            if (assignees.isEmpty()) return@forEach
+            val share = item.amount / assignees.size
+            assignees.forEach { id -> memberTotals[id] = (memberTotals[id] ?: 0.0) + share }
+        }
+
+        db.withTransaction {
+            db.expenseDao().insertExpense(
+                Expense(
+                    id          = expenseId,
+                    groupId     = groupId,
+                    description = description,
+                    amount      = totalAmount,
+                    paidById    = paidById,
+                    category    = category,
+                    splitType   = SplitType.AMOUNT,
+                    isItemised  = true
+                )
+            )
+            db.expenseSplitDao().insertSplits(
+                memberTotals.map { (memberId, amt) ->
+                    ExpenseSplit(
+                        id        = UUID.randomUUID().toString(),
+                        expenseId = expenseId,
+                        memberId  = memberId,
+                        amount    = round(amt * 100).toDouble() / 100.0
+                    )
+                }
+            )
+            db.expenseItemDao().insertItems(
+                items.map { item ->
+                    val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+                    ExpenseItem(
+                        id                = item.id,   // stable ID from BillItemData
+                        expenseId         = expenseId,
+                        name              = item.name,
+                        amount            = item.amount,
+                        assignedMemberIds = JSONArray(assignees).toString()
+                    )
+                }
+            )
+        }
+    }
+
+    /**
+     * Updates an existing expense that has (or is being given) itemized line items.
+     * Recalculates splits from item assignments and applies minimal item changes in one transaction:
+     *  - Only [deletedItemIds] are removed from the DB (items the user explicitly removed).
+     *  - All current [items] are upserted (REPLACE) — new rows are inserted, existing rows
+     *    are updated in-place, and unchanged rows are rewritten with the same values.
+     * This avoids the wipe-and-re-insert anti-pattern that would discard unmodified rows.
+     */
+    suspend fun updateExpenseWithItems(
+        expense: Expense,
+        items: List<BillItemData>,
+        deletedItemIds: List<String>,
+        allMemberIds: List<String>
+    ) {
+        val totalAmount = items.sumOf { it.amount }
+
+        val memberTotals = mutableMapOf<String, Double>()
+        items.forEach { item ->
+            val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+            if (assignees.isEmpty()) return@forEach
+            val share = item.amount / assignees.size
+            assignees.forEach { id -> memberTotals[id] = (memberTotals[id] ?: 0.0) + share }
+        }
+
+        db.withTransaction {
+            db.expenseDao().updateExpense(
+                expense.copy(amount = totalAmount, splitType = SplitType.AMOUNT, isItemised = true)
+            )
+            db.expenseSplitDao().deleteSplitsForExpense(expense.id)
+            db.expenseSplitDao().insertSplits(
+                memberTotals.map { (memberId, amt) ->
+                    ExpenseSplit(
+                        id        = UUID.randomUUID().toString(),
+                        expenseId = expense.id,
+                        memberId  = memberId,
+                        amount    = round(amt * 100).toDouble() / 100.0
+                    )
+                }
+            )
+            // Delete only the items the user explicitly removed — preserves untouched rows.
+            if (deletedItemIds.isNotEmpty()) {
+                db.expenseItemDao().deleteItemsByIds(deletedItemIds)
+            }
+            // Upsert current items: REPLACE updates existing rows, inserts new ones.
+            db.expenseItemDao().insertItems(
+                items.map { item ->
+                    val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+                    ExpenseItem(
+                        id                = item.id,   // stable ID preserves row identity
+                        expenseId         = expense.id,
+                        name              = item.name,
+                        amount            = item.amount,
+                        assignedMemberIds = JSONArray(assignees).toString()
+                    )
+                }
+            )
         }
     }
 

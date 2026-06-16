@@ -30,6 +30,10 @@ interface ExpenseSplitDao {
     @Query("SELECT * FROM expense_splits")
     fun getAllSplits(): Flow<List<ExpenseSplit>>
 
+    /** One-shot read of every split — used by [com.splitexpense.util.BackupManager]. */
+    @Query("SELECT * FROM expense_splits")
+    suspend fun getAllSplitsOnce(): List<ExpenseSplit>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSplits(splits: List<ExpenseSplit>)
 

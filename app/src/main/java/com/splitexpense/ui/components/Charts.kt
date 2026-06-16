@@ -41,7 +41,8 @@ fun InteractivePieChart(
     entries: List<ChartEntry>,
     modifier: Modifier = Modifier,
     chartSize: Dp = 220.dp,
-    centerLabel: String = ""
+    centerLabel: String = "",
+    currencySymbol: String = "₹"
 ) {
     if (entries.isEmpty()) return
 
@@ -170,7 +171,7 @@ fun InteractivePieChart(
             ) {
                 if (sel != null) {
                     Text(
-                        "₹${"%.0f".format(sel.value)}",
+                        "$currencySymbol${"%.0f".format(sel.value)}",
                         style     = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         color     = sel.color,
                         textAlign = TextAlign.Center,
@@ -191,7 +192,7 @@ fun InteractivePieChart(
                     )
                 } else {
                     Text(
-                        centerLabel.ifEmpty { "₹${"%.0f".format(total)}" },
+                        centerLabel.ifEmpty { "$currencySymbol${"%.0f".format(total)}" },
                         style     = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
                         color     = Text1,
                         textAlign = TextAlign.Center,
@@ -243,7 +244,7 @@ fun InteractivePieChart(
                         modifier   = Modifier.weight(1f)
                     )
                     Text(
-                        "₹${"%.0f".format(entry.value)}",
+                        "$currencySymbol${"%.0f".format(entry.value)}",
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                         color = if (isSelected) entry.color else Text2
                     )
@@ -262,12 +263,12 @@ fun InteractivePieChart(
 
 // ── Backward-compat: CategoryChart now shows the interactive pie ───────────────
 @Composable
-fun CategoryChart(entries: List<ChartEntry>, modifier: Modifier = Modifier) =
-    InteractivePieChart(entries = entries, modifier = modifier)
+fun CategoryChart(entries: List<ChartEntry>, modifier: Modifier = Modifier, currencySymbol: String = "₹") =
+    InteractivePieChart(entries = entries, modifier = modifier, currencySymbol = currencySymbol)
 
 // ── Horizontal bar chart ──────────────────────────────────────────────────────
 @Composable
-fun HorizontalBarChart(entries: List<ChartEntry>, modifier: Modifier = Modifier) {
+fun HorizontalBarChart(entries: List<ChartEntry>, modifier: Modifier = Modifier, currencySymbol: String = "₹") {
     if (entries.isEmpty()) return
     val maxVal = entries.maxOf { it.value }.coerceAtLeast(1f)
 
@@ -301,7 +302,7 @@ fun HorizontalBarChart(entries: List<ChartEntry>, modifier: Modifier = Modifier)
                     }
                 }
                 Text(
-                    text  = "₹${"%.0f".format(entry.value)}",
+                    text  = "$currencySymbol${"%.0f".format(entry.value)}",
                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                     color = Text2,
                     modifier = Modifier.width(60.dp)
@@ -316,8 +317,9 @@ fun HorizontalBarChart(entries: List<ChartEntry>, modifier: Modifier = Modifier)
 fun DonutChart(
     entries: List<ChartEntry>,
     modifier: Modifier = Modifier,
-    centerLabel: String = ""
-) = InteractivePieChart(entries = entries, modifier = modifier, centerLabel = centerLabel)
+    centerLabel: String = "",
+    currencySymbol: String = "₹"
+) = InteractivePieChart(entries = entries, modifier = modifier, centerLabel = centerLabel, currencySymbol = currencySymbol)
 
 @Composable
 fun ChartLegend(entries: List<ChartEntry>, modifier: Modifier = Modifier) { /* no-op */ }

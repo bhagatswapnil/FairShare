@@ -11,8 +11,10 @@ import android.net.Uri
 import androidx.core.content.FileProvider
 import com.splitexpense.data.db.entity.Category
 import com.splitexpense.data.db.entity.Expense
+import com.splitexpense.data.db.entity.ExpenseItem
 import com.splitexpense.data.db.entity.ExpenseSplit
 import com.splitexpense.data.db.entity.Group
+import org.json.JSONArray
 import com.splitexpense.util.displayName
 import com.splitexpense.data.db.entity.Member
 import com.splitexpense.data.model.DebtTransaction
@@ -57,11 +59,17 @@ class PdfExporter(private val context: Context) {
         expenses: List<Expense>,
         splits: List<ExpenseSplit>,
         balances: List<MemberBalance>,
-        debts: List<DebtTransaction>
+        debts: List<DebtTransaction>,
+        expenseItems: List<ExpenseItem> = emptyList(),
+        // Currency is now an app-wide setting (AppSettingsManager), not per-group.
+        // Defaults to the group's stored (vestigial) currencyCode for any caller
+        // that hasn't been updated to pass the live app-wide symbol explicitly.
+        currencySymbol: String = currencySymbolFor(group.currencyCode)
     ): Uri {
         val doc = PdfDocument()
-        val memberMap = members.associateBy { it.id }
-        val splitsMap = splits.groupBy { it.expenseId }
+        val memberMap    = members.associateBy { it.id }
+        val splitsMap    = splits.groupBy { it.expenseId }
+        val itemsMap     = expenseItems.groupBy { it.expenseId }
         // Pre-compute each member's raw expense share (sum of their split amounts).
         // Used in the summary page so the Share column reflects expense obligations,
         // not the settlement-adjusted net balance.
@@ -69,11 +77,11 @@ class PdfExporter(private val context: Context) {
 
         // Page 1 – summary
         val p1 = doc.startPage(PdfDocument.PageInfo.Builder(PW.toInt(), PH.toInt(), 1).create())
-        drawSummaryPage(p1.canvas, group, members, expenses, balances, debts, memberShareMap)
+        drawSummaryPage(p1.canvas, group, members, expenses, balances, debts, memberShareMap, currencySymbol)
         doc.finishPage(p1)
 
         // Page 2+ – expense detail
-        drawExpensePages(doc, expenses, splitsMap, memberMap)
+        drawExpensePages(doc, expenses, splitsMap, memberMap, itemsMap, currencySymbol)
 
         val fileName = "FairShare_${group.name.replace(Regex("[^A-Za-z0-9]"), "_")}.pdf"
         val file = File(context.cacheDir, fileName)
@@ -92,7 +100,8 @@ class PdfExporter(private val context: Context) {
         expenses: List<Expense>,
         balances: List<MemberBalance>,
         debts: List<DebtTransaction>,
-        memberShares: Map<String, Double>
+        memberShares: Map<String, Double>,
+        currencySymbol: String
     ) {
         // Header bar
         c.drawRect(0f, 0f, PW, 44f, fill(HEADER_BG))
@@ -121,7 +130,7 @@ class PdfExporter(private val context: Context) {
 
         // Stats row
         val total = expenses.sumOf { it.amount }
-        val statLabels = listOf("Total Spent" to "₹${"%.2f".format(total)}", "Expenses" to "${expenses.size}", "Members" to "${members.size}")
+        val statLabels = listOf("Total Spent" to "$currencySymbol${"%.2f".format(total)}", "Expenses" to "${expenses.size}", "Members" to "${members.size}")
         statLabels.forEachIndexed { i, (label, value) ->
             val bx = M + i * (CW / 3f)
             c.drawRoundRect(RectF(bx, y, bx + CW / 3f - 6f, y + 42f), 6f, 6f, fill(CHIP_BG))
@@ -147,8 +156,8 @@ class PdfExporter(private val context: Context) {
             val paid  = expenses.filter { it.paidById == bal.memberId }.sumOf { it.amount }
             val share = memberShares[bal.memberId] ?: 0.0
             val netTxt = when {
-                bal.netBalance > 0.01  -> "+₹${"%.2f".format(bal.netBalance)}"
-                bal.netBalance < -0.01 -> "-₹${"%.2f".format(-bal.netBalance)}"
+                bal.netBalance > 0.01  -> "+$currencySymbol${"%.2f".format(bal.netBalance)}"
+                bal.netBalance < -0.01 -> "-$currencySymbol${"%.2f".format(-bal.netBalance)}"
                 else                    -> "Settled"
             }
             val netColor = when {
@@ -157,8 +166,8 @@ class PdfExporter(private val context: Context) {
                 else                    -> INK_LIGHT
             }
             c.drawText(bal.memberName, colX[0], y, txt(INK, 8.5f))
-            c.drawText("₹${"%.2f".format(paid)}", colX[1], y, txt(INK_MID, 8.5f, mono = true, right = true))
-            c.drawText("₹${"%.2f".format(share)}", colX[2], y, txt(INK_MID, 8.5f, mono = true, right = true))
+            c.drawText("$currencySymbol${"%.2f".format(paid)}", colX[1], y, txt(INK_MID, 8.5f, mono = true, right = true))
+            c.drawText("$currencySymbol${"%.2f".format(share)}", colX[2], y, txt(INK_MID, 8.5f, mono = true, right = true))
             c.drawText(netTxt, colX[3], y, txt(netColor, 8.5f, bold = true, mono = true, right = true))
             y += 16f
         }
@@ -172,7 +181,7 @@ class PdfExporter(private val context: Context) {
                 c.drawText("${debt.fromName}", M + 8f, y, txt(RED, 8.5f, bold = true))
                 c.drawText("  owes  ", M + 8f + paint8w(debt.fromName), y, txt(INK_MID, 8.5f))
                 c.drawText(debt.toName, M + 8f + paint8w("${debt.fromName}  owes  "), y, txt(GREEN, 8.5f, bold = true))
-                c.drawText("₹${"%.2f".format(debt.amount)}", PW - M - 8f, y, txt(RED, 9f, bold = true, mono = true, right = true))
+                c.drawText("$currencySymbol${"%.2f".format(debt.amount)}", PW - M - 8f, y, txt(RED, 9f, bold = true, mono = true, right = true))
                 y += 18f
             }
             y += 6f; hRule(c, y); y += 14f
@@ -192,7 +201,7 @@ class PdfExporter(private val context: Context) {
             c.drawText("${cat.displayName()}", M, y, txt(INK, 8.5f))
             c.drawRect(M + 95f, y - 9f, M + 95f + barMaxW, y - 3f, fill(CHIP_BG))
             c.drawRect(M + 95f, y - 9f, M + 95f + barW, y - 3f, fill(ACCENT))
-            c.drawText("₹${"%.2f".format(amt)}  ($pct%)", PW - M, y, txt(INK_MID, 8f, mono = true, right = true))
+            c.drawText("$currencySymbol${"%.2f".format(amt)}  ($pct%)", PW - M, y, txt(INK_MID, 8f, mono = true, right = true))
             y += 14f
         }
 
@@ -206,17 +215,21 @@ class PdfExporter(private val context: Context) {
         doc: PdfDocument,
         expenses: List<Expense>,
         splitsMap: Map<String, List<ExpenseSplit>>,
-        memberMap: Map<String, Member>
+        memberMap: Map<String, Member>,
+        itemsMap: Map<String, List<ExpenseItem>> = emptyMap(),
+        currencySymbol: String = "₹"
     ) {
         if (expenses.isEmpty()) return
 
         val sorted  = expenses.sortedByDescending { it.date }
 
-        val ROW_H   = 14f   // reduced gap between expense name and split lines
-        val SPLIT_H = 12f   // height of each per-member split line
-        val HDR_Y   = 58f   // y position of column header text
-        val START_Y = 72f   // y where the first data row begins
-        val BOTTOM  = PH - 60f  // lower bound — keeps room for grand-total + footer
+        val ROW_H    = 14f   // main expense row height
+        val SPLIT_H  = 12f   // height of each per-member split line
+        val ITEM_LBL = 9f    // "BILL ITEMS" mini-header height
+        val ITEM_H   = 11f   // height of each bill item line
+        val HDR_Y    = 58f   // y position of column header text
+        val START_Y  = 72f   // y where the first data row begins
+        val BOTTOM   = PH - 60f  // lower bound — keeps room for grand-total + footer
 
         var pageNum = 2
         var curPage = doc.startPage(PdfDocument.PageInfo.Builder(PW.toInt(), PH.toInt(), pageNum).create())
@@ -243,7 +256,9 @@ class PdfExporter(private val context: Context) {
         for (expense in sorted) {
             val expSplits = (splitsMap[expense.id] ?: emptyList())
                 .sortedBy { memberMap[it.memberId]?.name ?: "" }
-            val blockH = ROW_H + expSplits.size * SPLIT_H
+            val expItems  = itemsMap[expense.id] ?: emptyList()
+            val itemsBlockH = if (expItems.isNotEmpty()) ITEM_LBL + expItems.size * ITEM_H else 0f
+            val blockH = ROW_H + expSplits.size * SPLIT_H + itemsBlockH
 
             // Start a new page if this block won't fit
             if (y + blockH > BOTTOM) {
@@ -257,7 +272,7 @@ class PdfExporter(private val context: Context) {
                 drawPageHeader()
             }
 
-            // Alternating row background spanning main row + all split lines
+            // Alternating row background spanning main row + all split lines + items
             if (rowIdx % 2 == 1)
                 c.drawRect(M - 2f, y - 10f, PW - M + 2f, y - 10f + blockH, fill(ROW_ALT))
 
@@ -271,7 +286,7 @@ class PdfExporter(private val context: Context) {
             c.drawText(desc,                               M + 68f,  y, txt(INK,     8f, bold = true))
             c.drawText(payer,                              M + 230f, y, txt(INK_MID, 7.5f))
             drawCategoryChip(c, M + 310f, y, expense.category)
-            c.drawText("₹${"%.2f".format(expense.amount)}", PW - M, y,
+            c.drawText("$currencySymbol${"%.2f".format(expense.amount)}", PW - M, y,
                 txt(INK, 8f, bold = true, mono = true, right = true))
 
             y += ROW_H
@@ -283,9 +298,27 @@ class PdfExporter(private val context: Context) {
                 val pct = if (expense.amount > 0.01)
                     split.amount / expense.amount * 100.0 else 0.0
                 c.drawText("· $name (${"%.0f".format(pct)}%)", M + 76f, y, txt(INK_LIGHT, 6.5f))
-                c.drawText("₹${"%.2f".format(split.amount)}", PW - M, y,
+                c.drawText("$currencySymbol${"%.2f".format(split.amount)}", PW - M, y,
                     txt(INK_MID, 7f, mono = true, right = true))
                 y += SPLIT_H
+            }
+
+            // Bill items sub-section (only for scanned expenses)
+            if (expItems.isNotEmpty()) {
+                c.drawText("BILL ITEMS", M + 76f, y, txt(INK_LIGHT, 5.5f, bold = true))
+                y += ITEM_LBL
+                for (item in expItems) {
+                    val assignedIds   = parseJsonIds(item.assignedMemberIds)
+                    val assignedLabel = if (assignedIds.isEmpty()) "all"
+                        else assignedIds.mapNotNull { memberMap[it]?.name }
+                            .joinToString(", ")
+                            .let { if (it.length > 32) it.take(30) + "…" else it }
+                    val itemName = if (item.name.length > 22) item.name.take(20) + "…" else item.name
+                    c.drawText("▸ $itemName  →  $assignedLabel", M + 76f, y, txt(INK_LIGHT, 6.5f))
+                    c.drawText("$currencySymbol${"%.2f".format(item.amount)}", PW - M, y,
+                        txt(INK_MID, 6.5f, mono = true, right = true))
+                    y += ITEM_H
+                }
             }
 
             rowIdx++
@@ -294,7 +327,7 @@ class PdfExporter(private val context: Context) {
         // Grand total at the bottom of the last page
         y += 8f; hRule(c, y); y += 12f
         c.drawText("Grand Total", M, y, txt(INK, 9f, bold = true))
-        c.drawText("₹${"%.2f".format(sorted.sumOf { it.amount })}", PW - M, y,
+        c.drawText("$currencySymbol${"%.2f".format(sorted.sumOf { it.amount })}", PW - M, y,
             txt(INK, 10f, bold = true, mono = true, right = true))
 
         pageFooter(c, pageNum)
@@ -355,4 +388,10 @@ class PdfExporter(private val context: Context) {
 
     private fun paint8w(text: String): Float =
         Paint(Paint.ANTI_ALIAS_FLAG).apply { textSize = 8.5f }.measureText(text)
+
+    /** Safely deserialises the JSON member-ID array stored in [ExpenseItem.assignedMemberIds]. */
+    private fun parseJsonIds(json: String): List<String> = try {
+        val arr = JSONArray(json)
+        (0 until arr.length()).map { arr.getString(it) }
+    } catch (_: Exception) { emptyList() }
 }

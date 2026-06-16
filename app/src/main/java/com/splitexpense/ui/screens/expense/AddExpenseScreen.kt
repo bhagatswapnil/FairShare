@@ -17,6 +17,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -46,9 +47,52 @@ fun AddExpenseScreen(
     )
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val hasItems = state.expenseItems.isNotEmpty()
+    var showItemsWarning by remember { mutableStateOf(false) }
+
+    // Warn before switching to item mode when there is already amount/split data to lose.
+    // Only fires on the very first tap (items list is empty → transitioning into item mode).
+    val hasExistingData = viewModel.isEditing || state.amount.isNotBlank()
+    val onAddFirstItem: () -> Unit = {
+        if (!hasItems && hasExistingData) showItemsWarning = true
+        else viewModel.onAddItem()
+    }
 
     LaunchedEffect(state.saved) {
         if (state.saved) onBack()
+    }
+
+    if (showItemsWarning) {
+        AlertDialog(
+            onDismissRequest = { showItemsWarning = false },
+            containerColor   = Surface2,
+            shape            = RoundedCornerShape(16.dp),
+            icon = {
+                Icon(Icons.Filled.Warning, contentDescription = null, tint = AmberAccent)
+            },
+            title = {
+                Text("Replace split data?", color = Text1, fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleMedium)
+            },
+            text = {
+                Text(
+                    "Switching to itemised mode will erase the current amount and split " +
+                    "settings. This cannot be undone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Text2
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showItemsWarning = false; viewModel.onAddItem() }) {
+                    Text("Continue", color = NeonRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showItemsWarning = false }) {
+                    Text("Cancel", color = Text3)
+                }
+            }
+        )
     }
 
     Box(modifier = Modifier.fillMaxSize().background(Bg)) {
@@ -88,6 +132,17 @@ fun AddExpenseScreen(
             }
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Border))
 
+            // Show spinner until edit-mode data is fully loaded
+            if (state.isInitializing) {
+                Box(
+                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    CircularProgressIndicator(color = NeonGreen, strokeWidth = 2.dp, modifier = Modifier.size(36.dp))
+                }
+                return@Column
+            }
+
             // ── Form ──────────────────────────────────────────────────────────
             Column(
                 modifier = Modifier
@@ -96,7 +151,12 @@ fun AddExpenseScreen(
                     .padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                AmountField(amount = state.amount, onAmountChange = viewModel::onAmountChange)
+                // Amount: computed from items (read-only) or manual
+                if (hasItems) {
+                    ComputedAmountDisplay(total = state.itemsTotal, currencySymbol = state.currencySymbol)
+                } else {
+                    AmountField(amount = state.amount, onAmountChange = viewModel::onAmountChange, currencySymbol = state.currencySymbol)
+                }
 
                 OutlinedTextField(
                     value = state.description,
@@ -111,15 +171,32 @@ fun AddExpenseScreen(
 
                 PaidBySelector(members = state.members, selectedId = state.paidById, onSelect = viewModel::onPaidByChange)
                 CategorySelector(selected = state.category, onSelect = viewModel::onCategoryChange)
-                SplitTypeSelector(selected = state.splitType, onSelect = viewModel::onSplitTypeChange)
-                MemberSplitSection(
-                    members = state.members,
-                    selectedIds = state.selectedMemberIds,
-                    splitType = state.splitType,
-                    amount = state.amount.toDoubleOrNull() ?: 0.0,
-                    customSplits = state.customSplits,
-                    onToggleMember = viewModel::onMemberToggle,
-                    onCustomSplitChange = viewModel::onCustomSplitChange
+
+                // Split controls only shown when NOT in item mode
+                if (!hasItems) {
+                    SplitTypeSelector(selected = state.splitType, onSelect = viewModel::onSplitTypeChange)
+                    MemberSplitSection(
+                        members             = state.members,
+                        selectedIds         = state.selectedMemberIds,
+                        splitType           = state.splitType,
+                        amount              = state.amount.toDoubleOrNull() ?: 0.0,
+                        customSplits        = state.customSplits,
+                        currencySymbol      = state.currencySymbol,
+                        onToggleMember      = viewModel::onMemberToggle,
+                        onCustomSplitChange = viewModel::onCustomSplitChange
+                    )
+                }
+
+                // Bill items section (always present)
+                ExpenseItemsSection(
+                    items              = state.expenseItems,
+                    members            = state.members,
+                    currencySymbol     = state.currencySymbol,
+                    onAddItem          = onAddFirstItem,
+                    onRemoveItem       = viewModel::onRemoveItem,
+                    onItemNameChange   = viewModel::onItemNameChange,
+                    onItemAmountChange = viewModel::onItemAmountChange,
+                    onToggleMember     = viewModel::onItemToggleMember
                 )
 
                 state.error?.let { err ->
@@ -163,20 +240,238 @@ fun AddExpenseScreen(
     }
 }
 
+// ── Computed total (item-mode) ────────────────────────────────────────────────
+
 @Composable
-private fun AmountField(amount: String, onAmountChange: (String) -> Unit) {
+private fun ComputedAmountDisplay(total: Double, currencySymbol: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Surface2, RoundedCornerShape(14.dp))
             .border(1.dp, Border, RoundedCornerShape(14.dp))
-            .padding(20.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text("TOTAL FROM ITEMS", style = MaterialTheme.typography.labelSmall,
+            color = Text3, letterSpacing = 1.2.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(currencySymbol, style = MaterialTheme.typography.headlineLarge,
+                color = NeonGreen, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.width(4.dp))
+            Text(
+                "%.2f".format(total),
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold,
+                color = Text1
+            )
+        }
+        Text("Auto-calculated from bill items below",
+            style = MaterialTheme.typography.labelSmall, color = Text3)
+    }
+}
+
+// ── Bill items section ────────────────────────────────────────────────────────
+
+@Composable
+private fun ExpenseItemsSection(
+    items: List<ExpenseItemState>,
+    members: List<Member>,
+    currencySymbol: String,
+    onAddItem: () -> Unit,
+    onRemoveItem: (Int) -> Unit,
+    onItemNameChange: (Int, String) -> Unit,
+    onItemAmountChange: (Int, String) -> Unit,
+    onToggleMember: (Int, String) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+        // Section header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                if (items.isEmpty()) "BILL ITEMS (OPTIONAL)"
+                else "BILL ITEMS  ·  ${items.size}  ·  ${formatCurrency(items.sumOf { it.parsedAmount }, currencySymbol)}",
+                style = MaterialTheme.typography.labelSmall,
+                color = Text3,
+                letterSpacing = 0.8.sp,
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        // Item rows
+        items.forEachIndexed { index, item ->
+            ExpenseItemRow(
+                item           = item,
+                index          = index,
+                members        = members,
+                currencySymbol = currencySymbol,
+                onNameChange   = { onItemNameChange(index, it) },
+                onAmountChange = { onItemAmountChange(index, it) },
+                onToggleMember = { onToggleMember(index, it) },
+                onRemove       = { onRemoveItem(index) }
+            )
+        }
+
+        // Add item button
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Surface2, RoundedCornerShape(10.dp))
+                .border(
+                    1.dp,
+                    if (items.isEmpty()) Border else BorderHi,
+                    RoundedCornerShape(10.dp)
+                )
+                .clickable(onClick = onAddItem)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null,
+                tint = if (items.isEmpty()) Text3 else NeonGreen,
+                modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                if (items.isEmpty()) "Add Bill Items" else "Add Item",
+                color = if (items.isEmpty()) Text3 else NeonGreen,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+}
+
+@Composable
+private fun ExpenseItemRow(
+    item: ExpenseItemState,
+    index: Int,
+    members: List<Member>,
+    currencySymbol: String,
+    onNameChange: (String) -> Unit,
+    onAmountChange: (String) -> Unit,
+    onToggleMember: (String) -> Unit,
+    onRemove: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface2, RoundedCornerShape(12.dp))
+            .border(1.dp, Border, RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // Name + Amount + Remove
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("${index + 1}.", color = Text3,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.width(20.dp))
+            OutlinedTextField(
+                value = item.name,
+                onValueChange = onNameChange,
+                placeholder = { Text("Item name", color = Text3) },
+                singleLine = true,
+                colors = darkFieldColors(),
+                modifier = Modifier.weight(1f),
+                textStyle = MaterialTheme.typography.bodySmall.copy(color = Text1)
+            )
+            OutlinedTextField(
+                value = item.amount,
+                onValueChange = { v ->
+                    if (v.isEmpty() || v.matches(Regex("^\\d*\\.?\\d{0,2}$"))) onAmountChange(v)
+                },
+                prefix = { Text(currencySymbol, color = Text3, style = MaterialTheme.typography.bodySmall) },
+                singleLine = true,
+                colors = darkFieldColors(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.width(100.dp),
+                textStyle = MaterialTheme.typography.bodySmall.copy(color = Text1)
+            )
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(NeonRedDim, RoundedCornerShape(8.dp))
+                    .clickable(onClick = onRemove),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(Icons.Filled.Close, contentDescription = "Remove",
+                    tint = NeonRed, modifier = Modifier.size(14.dp))
+            }
+        }
+
+        // Member assignment chips
+        if (members.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                Text("For:", color = Text3, style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.width(24.dp))
+                members.forEach { member ->
+                    val assigned = member.id in item.assignedMemberIds
+                    val isAll    = item.assignedMemberIds.isEmpty()
+                    val active   = assigned || isAll
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (active) NeonGreenDim else Surface3)
+                            .border(
+                                1.dp,
+                                if (active) NeonGreen.copy(alpha = 0.6f) else Border,
+                                RoundedCornerShape(6.dp)
+                            )
+                            .alpha(if (active) 1f else 0.55f)
+                            .clickable { onToggleMember(member.id) }
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            member.name.take(8),
+                            color = if (active) NeonGreen else Text3,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            }
+            // Per-person share hint
+            val amt = item.parsedAmount
+            val assigneeCount = if (item.assignedMemberIds.isEmpty()) members.size
+                                else item.assignedMemberIds.size
+            if (amt > 0.01 && assigneeCount > 1) {
+                Text(
+                    "${formatCurrency(amt / assigneeCount, currencySymbol)}/person",
+                    color = Text3,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(start = 30.dp)
+                )
+            }
+        }
+    }
+}
+
+// ── Amount field (manual mode) ────────────────────────────────────────────────
+
+@Composable
+private fun AmountField(amount: String, onAmountChange: (String) -> Unit, currencySymbol: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface2, RoundedCornerShape(14.dp))
+            .border(1.dp, Border, RoundedCornerShape(14.dp))
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Text("AMOUNT", style = MaterialTheme.typography.labelSmall, color = Text3, letterSpacing = 1.2.sp)
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("₹", style = MaterialTheme.typography.headlineLarge, color = NeonGreen, fontWeight = FontWeight.Bold)
+            Text(currencySymbol, style = MaterialTheme.typography.headlineLarge, color = NeonGreen, fontWeight = FontWeight.Bold)
             Spacer(Modifier.width(4.dp))
             OutlinedTextField(
                 value = amount,
@@ -331,6 +626,7 @@ private fun MemberSplitSection(
     splitType: SplitType,
     amount: Double,
     customSplits: Map<String, String>,
+    currencySymbol: String,
     onToggleMember: (String) -> Unit,
     onCustomSplitChange: (String, String) -> Unit
 ) {
@@ -340,7 +636,7 @@ private fun MemberSplitSection(
             Spacer(Modifier.weight(1f))
             if (splitType == SplitType.EQUAL && selectedIds.isNotEmpty() && amount > 0) {
                 Text(
-                    "${formatCurrency(amount / selectedIds.size)}/person",
+                    "${formatCurrency(amount / selectedIds.size, currencySymbol)}/person",
                     style = MaterialTheme.typography.labelSmall,
                     color = NeonGreen
                 )
@@ -356,6 +652,7 @@ private fun MemberSplitSection(
                     .padding(vertical = 3.dp)
                     .background(Surface2, RoundedCornerShape(10.dp))
                     .border(1.dp, if (isSelected) BorderHi else Border, RoundedCornerShape(10.dp))
+                    .alpha(if (isSelected) 1f else 0.55f)
                     .clickable { onToggleMember(member.id) }
                     .padding(10.dp),
                 verticalAlignment = Alignment.CenterVertically
@@ -383,14 +680,14 @@ private fun MemberSplitSection(
                     OutlinedTextField(
                         value = customSplits[member.id] ?: "",
                         onValueChange = { onCustomSplitChange(member.id, it) },
-                        suffix = { Text(if (splitType == SplitType.PERCENTAGE) "%" else "₹", color = Text3) },
+                        suffix = { Text(if (splitType == SplitType.PERCENTAGE) "%" else currencySymbol, color = Text3) },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         singleLine = true,
                         colors = darkFieldColors(),
                         modifier = Modifier.width(90.dp)
                     )
                 } else if (isSelected && amount > 0) {
-                    Text(formatCurrency(amount / selectedIds.size), style = MaterialTheme.typography.bodySmall, color = NeonGreen)
+                    Text(formatCurrency(amount / selectedIds.size, currencySymbol), style = MaterialTheme.typography.bodySmall, color = NeonGreen)
                 }
             }
         }

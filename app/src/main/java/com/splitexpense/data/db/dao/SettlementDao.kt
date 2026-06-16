@@ -18,6 +18,10 @@ interface SettlementDao {
     @Query("SELECT * FROM settlements")
     fun getAllSettlements(): Flow<List<Settlement>>
 
+    /** One-shot read of every settlement — used by [com.splitexpense.util.BackupManager]. */
+    @Query("SELECT * FROM settlements")
+    suspend fun getAllSettlementsOnce(): List<Settlement>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertSettlement(settlement: Settlement)
 

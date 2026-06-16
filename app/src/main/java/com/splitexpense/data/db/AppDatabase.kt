@@ -19,8 +19,9 @@ class Converters {
 }
 
 @Database(
-    entities = [Group::class, Member::class, Expense::class, ExpenseSplit::class, Settlement::class],
-    version = 2,
+    entities = [Group::class, Member::class, Expense::class, ExpenseSplit::class,
+                Settlement::class, ExpenseItem::class],
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -30,6 +31,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun expenseDao(): ExpenseDao
     abstract fun expenseSplitDao(): ExpenseSplitDao
     abstract fun settlementDao(): SettlementDao
+    abstract fun expenseItemDao(): ExpenseItemDao
 
     companion object {
         @Volatile private var INSTANCE: AppDatabase? = null
@@ -57,6 +59,46 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS expense_items (
+                        id                 TEXT NOT NULL PRIMARY KEY,
+                        expenseId          TEXT NOT NULL,
+                        name               TEXT NOT NULL,
+                        amount             REAL NOT NULL,
+                        assignedMemberIds  TEXT NOT NULL DEFAULT '[]',
+                        FOREIGN KEY (expenseId) REFERENCES expenses(id) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                database.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_expense_items_expenseId ON expense_items(expenseId)"
+                )
+            }
+        }
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE expenses ADD COLUMN isItemised INTEGER NOT NULL DEFAULT 0"
+                )
+                // Backfill: any expense that already has rows in expense_items is itemised.
+                database.execSQL(
+                    "UPDATE expenses SET isItemised = 1 WHERE id IN (SELECT DISTINCT expenseId FROM expense_items)"
+                )
+            }
+        }
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                database.execSQL(
+                    "ALTER TABLE groups ADD COLUMN currencyCode TEXT NOT NULL DEFAULT 'INR'"
+                )
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
                 Room.databaseBuilder(
@@ -64,7 +106,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "split_expense_db"
                 )
-                    .addMigrations(MIGRATION_1_2)
+                    .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                     .build()
                     .also { INSTANCE = it }
             }
