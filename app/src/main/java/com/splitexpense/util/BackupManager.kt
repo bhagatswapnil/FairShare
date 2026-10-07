@@ -42,7 +42,7 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
     // ── Backup ──────────────────────────────────────────────────────────────────
 
     /**
-     * Serialises all six tables to JSON, wraps the JSON in a ZIP archive, writes it
+     * Serialises all seven tables to JSON, wraps the JSON in a ZIP archive, writes it
      * to local storage, and returns a human-readable description of where it was saved.
      * Must be called on a background dispatcher.
      */
@@ -83,6 +83,8 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
         val splits      = parseSplits(root.getJSONArray("expenseSplits"))
         val settlements = parseSettlements(root.getJSONArray("settlements"))
         val items       = parseItems(root.optJSONArray("expenseItems") ?: JSONArray())
+        // Absent in pre-v7 backups → every member restores as solo.
+        val accounts    = parseAccounts(root.optJSONArray("memberAccounts") ?: JSONArray())
 
         db.withTransaction {
             db.groupDao().deleteAllGroups()          // CASCADE wipes everything
@@ -92,6 +94,7 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
             db.expenseSplitDao().insertSplits(splits)
             settlements.forEach { db.settlementDao().insertSettlement(it) }
             db.expenseItemDao().insertItems(items)
+            accounts.forEach    { db.memberAccountDao().insertAccount(it) }
         }
     }
 
@@ -104,6 +107,7 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
         val splits      = db.expenseSplitDao().getAllSplitsOnce()
         val settlements = db.settlementDao().getAllSettlementsOnce()
         val items       = db.expenseItemDao().getAllItemsOnce()
+        val accounts    = db.memberAccountDao().getAllAccountsOnce()
 
         return JSONObject().apply {
             put("version",    BACKUP_VERSION)
@@ -124,6 +128,14 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
                         put("id", m.id); put("groupId", m.groupId)
                         put("name", m.name); put("email", m.email)
                         put("avatarColor", m.avatarColor)
+                        m.accountId?.let { put("accountId", it) }
+                    })
+                }
+            })
+            put("memberAccounts", JSONArray().also { arr ->
+                accounts.forEach { a ->
+                    arr.put(JSONObject().apply {
+                        put("id", a.id); put("groupId", a.groupId); put("name", a.name)
                     })
                 }
             })
@@ -163,6 +175,7 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
                         put("id", i.id); put("expenseId", i.expenseId)
                         put("name", i.name); put("amount", i.amount)
                         put("assignedMemberIds", i.assignedMemberIds)
+                        put("splitMode", i.splitMode)
                     })
                 }
             })
@@ -269,7 +282,19 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
                 groupId     = o.getString("groupId"),
                 name        = o.getString("name"),
                 email       = o.optString("email", ""),
-                avatarColor = o.optLong("avatarColor", 0xFF6200EE)
+                avatarColor = o.optLong("avatarColor", 0xFF6200EE),
+                accountId   = o.optString("accountId").ifBlank { null }
+            ))
+        }
+    }
+
+    private fun parseAccounts(arr: JSONArray): List<MemberAccount> = buildList {
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            add(MemberAccount(
+                id      = o.getString("id"),
+                groupId = o.getString("groupId"),
+                name    = o.getString("name")
             ))
         }
     }
@@ -329,7 +354,9 @@ class BackupManager(private val context: Context, private val db: AppDatabase) {
                 expenseId         = o.getString("expenseId"),
                 name              = o.getString("name"),
                 amount            = o.getDouble("amount"),
-                assignedMemberIds = o.optString("assignedMemberIds", "[]")
+                assignedMemberIds = o.optString("assignedMemberIds", "[]"),
+                // Absent in older backups — those predate PERCENTAGE/QUANTITY items.
+                splitMode         = o.optString("splitMode", "EQUAL")
             ))
         }
     }

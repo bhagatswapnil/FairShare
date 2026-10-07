@@ -7,6 +7,7 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.splitexpense.SplitExpenseApplication
 import com.splitexpense.data.db.entity.Category
 import com.splitexpense.data.db.entity.Expense
+import com.splitexpense.data.db.entity.ItemSplitMode
 import com.splitexpense.data.db.entity.Member
 import com.splitexpense.data.db.entity.SplitType
 import com.splitexpense.data.repository.BillItemData
@@ -23,10 +24,25 @@ import java.util.UUID
 data class ExpenseItemState(
     val id: String = UUID.randomUUID().toString(),
     val name: String = "",
-    val amount: String = "0.00",
-    val assignedMemberIds: Set<String> = emptySet()   // empty = all group members
+    /** EQUAL/PERCENTAGE: total amount. QUANTITY: unit price (total = unitPrice × totalQty). */
+    val amount: String = "",
+    val splitMode: ItemSplitMode = ItemSplitMode.EQUAL,
+    val assignedMemberIds: Set<String> = emptySet(),      // used only in EQUAL mode
+    val memberWeights: Map<String, String> = emptyMap(),  // PERCENTAGE → pct string; QUANTITY → qty string
+    /** When true the item amount is treated as negative (discount / offer reduction). */
+    val isDiscount: Boolean = false
 ) {
-    val parsedAmount: Double get() = amount.toDoubleOrNull() ?: 0.0
+    val parsedAmount: Double get() {
+        val raw = when (splitMode) {
+            ItemSplitMode.EQUAL, ItemSplitMode.PERCENTAGE -> amount.toDoubleOrNull() ?: 0.0
+            ItemSplitMode.QUANTITY -> {
+                val unit = amount.toDoubleOrNull() ?: 0.0
+                val totalQty = memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                unit * totalQty
+            }
+        }
+        return if (isDiscount) -raw else raw
+    }
 }
 
 data class AddExpenseUiState(
@@ -139,16 +155,37 @@ class AddExpenseViewModel(
                 }
 
                 val itemStates = items.map { item ->
-                    val assignedIds = try {
-                        val arr = org.json.JSONArray(item.assignedMemberIds)
-                        (0 until arr.length()).map { arr.getString(it) }.toSet()
-                    } catch (_: Exception) { emptySet<String>() }
-                    ExpenseItemState(
-                        id                = item.id,
-                        name              = item.name,
-                        amount            = "%.2f".format(item.amount),
-                        assignedMemberIds = assignedIds
-                    )
+                    val mode = try { ItemSplitMode.valueOf(item.splitMode) } catch (_: Exception) { ItemSplitMode.EQUAL }
+                    val isDiscount = item.amount < 0
+                    val absAmount = Math.abs(item.amount)
+                    when (mode) {
+                        ItemSplitMode.EQUAL -> {
+                            val ids = try {
+                                val arr = org.json.JSONArray(item.assignedMemberIds)
+                                (0 until arr.length()).map { arr.getString(it) }.toSet()
+                            } catch (_: Exception) { emptySet<String>() }
+                            ExpenseItemState(id = item.id, name = item.name,
+                                amount = "%.2f".format(absAmount),
+                                splitMode = mode, assignedMemberIds = ids, isDiscount = isDiscount)
+                        }
+                        ItemSplitMode.PERCENTAGE, ItemSplitMode.QUANTITY -> {
+                            val weights = try {
+                                val arr = org.json.JSONArray(item.assignedMemberIds)
+                                (0 until arr.length()).associate { i ->
+                                    val obj = arr.getJSONObject(i)
+                                    obj.getString("id") to "%.2f".format(obj.getDouble("w"))
+                                }
+                            } catch (_: Exception) { emptyMap() }
+                            // QUANTITY mode stores total in DB; convert back to unit price
+                            val displayAmt = if (mode == ItemSplitMode.QUANTITY) {
+                                val totalQty = weights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                                if (totalQty > 0) "%.2f".format(absAmount / totalQty)
+                                else "%.2f".format(absAmount)
+                            } else "%.2f".format(absAmount)
+                            ExpenseItemState(id = item.id, name = item.name,
+                                amount = displayAmt, splitMode = mode, memberWeights = weights, isDiscount = isDiscount)
+                        }
+                    }
                 }
 
                 // Remember which item IDs came from the DB so onRemoveItem can
@@ -183,6 +220,7 @@ class AddExpenseViewModel(
 
     fun onDescriptionChange(v: String) = _state.update { it.copy(description = v, error = null) }
     fun onAmountChange(v: String)      = _state.update { it.copy(amount = v, error = null) }
+    fun onItemDiscountToggle(index: Int) = updateItem(index) { it.copy(isDiscount = !it.isDiscount) }
     fun onPaidByChange(id: String)     = _state.update { it.copy(paidById = id) }
     fun onCategoryChange(c: Category)  = _state.update { it.copy(category = c) }
     fun onSplitTypeChange(t: SplitType) = _state.update { it.copy(splitType = t, customSplits = emptyMap()) }
@@ -236,6 +274,14 @@ class AddExpenseViewModel(
         item.copy(assignedMemberIds = set)
     }
 
+    fun onItemSplitModeChange(itemIndex: Int, mode: ItemSplitMode) = updateItem(itemIndex) {
+        it.copy(splitMode = mode, assignedMemberIds = emptySet(), memberWeights = emptyMap())
+    }
+
+    fun onItemWeightChange(itemIndex: Int, memberId: String, value: String) = updateItem(itemIndex) { item ->
+        item.copy(memberWeights = item.memberWeights + (memberId to value))
+    }
+
     private fun updateItem(index: Int, transform: (ExpenseItemState) -> ExpenseItemState) {
         _state.update { s ->
             val list = s.expenseItems.toMutableList()
@@ -266,12 +312,12 @@ class AddExpenseViewModel(
             if (s.expenseItems.any { it.name.isBlank() }) {
                 _state.update { it.copy(error = "All items must have a name") }; return
             }
-            if (s.expenseItems.any { it.parsedAmount < 0.01 }) {
-                _state.update { it.copy(error = "All item amounts must be at least ${s.currencySymbol}0.01") }; return
+            if (s.expenseItems.any { Math.abs(it.parsedAmount) < 0.01 }) {
+                _state.update { it.copy(error = "All item amounts must be non-zero") }; return
             }
             val total = s.itemsTotal
-            if (total < 0.01) {
-                _state.update { it.copy(error = "Total must be greater than zero") }; return
+            if (Math.abs(total) < 0.01) {
+                _state.update { it.copy(error = "Total must be non-zero") }; return
             }
 
             _state.update { it.copy(isLoading = true, error = null) }
@@ -284,7 +330,9 @@ class AddExpenseViewModel(
                         id                = item.id,
                         name              = item.name.trim().ifBlank { "Item" },
                         amount            = item.parsedAmount,
-                        assignedMemberIds = item.assignedMemberIds.toList()
+                        assignedMemberIds = item.assignedMemberIds.toList(),
+                        splitMode         = item.splitMode,
+                        memberWeights     = item.memberWeights.mapValues { (_, v) -> v.toDoubleOrNull() ?: 0.0 }
                     )
                 }
                 // Snapshot and clear the pending deletes before the suspend call so a
@@ -330,13 +378,14 @@ class AddExpenseViewModel(
             if (totalAmount <= 0.0) {
                 _state.update { it.copy(error = "Amount must be greater than zero") }; return
             }
+            val finalAmount = totalAmount
             if (s.selectedMemberIds.isEmpty()) {
                 _state.update { it.copy(error = "Select at least one member") }; return
             }
 
             val splits: List<Pair<String, Double>> = when (s.splitType) {
                 SplitType.EQUAL -> {
-                    val share = totalAmount / s.selectedMemberIds.size
+                    val share = finalAmount / s.selectedMemberIds.size
                     s.selectedMemberIds.map { it to share }
                 }
                 SplitType.PERCENTAGE -> {
@@ -346,9 +395,9 @@ class AddExpenseViewModel(
                         return
                     }
                     val amounts = s.selectedMemberIds.map { id ->
-                        id to totalAmount * (s.customSplits[id]?.toDoubleOrNull() ?: 0.0) / 100.0
+                        id to finalAmount * (s.customSplits[id]?.toDoubleOrNull() ?: 0.0) / 100.0
                     }
-                    if (amounts.any { it.second < 0.01 }) {
+                    if (amounts.any { Math.abs(it.second) < 0.01 }) {
                         _state.update { it.copy(error = "Each member's computed share must be at least ${s.currencySymbol}0.01") }
                         return
                     }
@@ -376,7 +425,7 @@ class AddExpenseViewModel(
                         repository.updateExpense(
                             expense = originalExpense!!.copy(
                                 description = s.description.trim(),
-                                amount      = totalAmount,
+                                amount      = finalAmount,
                                 paidById    = s.paidById,
                                 category    = s.category,
                                 splitType   = s.splitType
@@ -385,7 +434,7 @@ class AddExpenseViewModel(
                         )
                     } else {
                         repository.addExpense(
-                            groupId, s.description.trim(), totalAmount,
+                            groupId, s.description.trim(), finalAmount,
                             s.paidById, s.category, s.splitType, splits
                         )
                     }

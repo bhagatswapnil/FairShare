@@ -7,23 +7,27 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import com.splitexpense.data.db.entity.Category
 
 fun Category.displayName(): String = when (this) {
-    Category.FOOD -> "Food"
-    Category.TRAVEL -> "Travel"
-    Category.UTILITIES -> "Utilities"
+    Category.FOOD          -> "Food"
+    Category.TRAVEL        -> "Travel"
+    Category.UTILITIES     -> "Utilities"
     Category.ENTERTAINMENT -> "Entertainment"
-    Category.SHOPPING -> "Shopping"
-    Category.HEALTH -> "Health"
-    Category.OTHER -> "Other"
+    Category.SHOPPING      -> "Shopping"
+    Category.HEALTH        -> "Health"
+    Category.DRINKS        -> "Drinks"
+    Category.BEVERAGES     -> "Beverages"
+    Category.OTHER         -> "Other"
 }
 
 fun Category.icon(): ImageVector = when (this) {
-    Category.FOOD -> Icons.Filled.Restaurant
-    Category.TRAVEL -> Icons.Filled.Flight
-    Category.UTILITIES -> Icons.Filled.Lightbulb
+    Category.FOOD          -> Icons.Filled.Restaurant
+    Category.TRAVEL        -> Icons.Filled.Flight
+    Category.UTILITIES     -> Icons.Filled.Lightbulb
     Category.ENTERTAINMENT -> Icons.Filled.Movie
-    Category.SHOPPING -> Icons.Filled.ShoppingCart
-    Category.HEALTH -> Icons.Filled.Favorite
-    Category.OTHER -> Icons.Filled.Category
+    Category.SHOPPING      -> Icons.Filled.ShoppingCart
+    Category.HEALTH        -> Icons.Filled.Favorite
+    Category.DRINKS        -> Icons.Filled.LocalBar
+    Category.BEVERAGES     -> Icons.Filled.Coffee
+    Category.OTHER         -> Icons.Filled.Category
 }
 
 fun Category.color(): Color = when (this) {
@@ -33,6 +37,8 @@ fun Category.color(): Color = when (this) {
     Category.ENTERTAINMENT -> Color(0xFF66BB6A)
     Category.SHOPPING      -> Color(0xFF7E57C2)
     Category.HEALTH        -> Color(0xFFEC407A)
+    Category.DRINKS        -> Color(0xFFFF7043)
+    Category.BEVERAGES     -> Color(0xFF26C6DA)
     Category.OTHER         -> Color(0xFF78909C)
 }
 

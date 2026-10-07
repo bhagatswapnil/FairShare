@@ -54,23 +54,26 @@ app/src/main/java/com/splitexpense/
 │
 ├── data/
 │   ├── db/
-│   │   ├── AppDatabase.kt                # Room DB, version 4; migrations 1→2→3→4
+│   │   ├── AppDatabase.kt                # Room DB, version 7; migrations 1→…→7
 │   │   ├── entity/
 │   │   │   ├── Group.kt
 │   │   │   ├── Member.kt
 │   │   │   ├── Expense.kt                # defines Category, SplitType enums; isItemised flag
 │   │   │   ├── ExpenseSplit.kt
 │   │   │   ├── ExpenseItem.kt            # NEW: line items from scanned bills
-│   │   │   └── Settlement.kt
+│   │   │   ├── Settlement.kt
+│   │   │   └── MemberAccount.kt          # NEW (v7): named linked-member account
 │   │   └── dao/
 │   │       ├── GroupDao.kt
-│   │       ├── MemberDao.kt
+│   │       ├── MemberDao.kt                # setAccountId targeted UPDATE (never REPLACE to update)
+│   │       ├── MemberAccountDao.kt         # linked accounts CRUD
 │   │       ├── ExpenseDao.kt             # includes GroupExpenseTotal projection
 │   │       ├── ExpenseSplitDao.kt
 │   │       ├── ExpenseItemDao.kt         # NEW: CRUD for expense_items
 │   │       └── SettlementDao.kt          # includes GroupSettledAmount projection
 │   ├── model/
-│   │   └── BalanceModels.kt              # MemberBalance, DebtTransaction data classes
+│   │   ├── BalanceModels.kt              # MemberBalance (incl. memberIds), DebtTransaction data classes
+│   │   └── BalanceMath.kt                # pure calculateBalances, mergeBalancesByAccount, simplifyDebts
 │   └── repository/
 │       └── ExpenseRepository.kt          # all business logic + DB access; BillItemData data class
 │
@@ -111,7 +114,7 @@ util/
 
 ## Database Schema
 
-**DB name:** `split_expense_db`  **Version:** 4
+**DB name:** `split_expense_db`  **Version:** 7
 
 ### `groups`
 | Column | Type | Notes |
@@ -130,6 +133,16 @@ util/
 | name | TEXT | |
 | email | TEXT | default "" |
 | avatarColor | INTEGER (Long) | ARGB from `avatarPalette` |
+| accountId | TEXT NULL | → `member_accounts.id` (added v7). **No FK constraint** — kept consistent by the repository. Null = solo |
+
+### `member_accounts` *(new in v7)*
+| Column | Type | Notes |
+|---|---|---|
+| id | TEXT PK | UUID |
+| groupId | TEXT | FK → groups.id ON DELETE CASCADE |
+| name | TEXT | custom account name, e.g. "The Bhagats" |
+
+Index: `index_member_accounts_groupId` on `groupId`.
 
 ### `expenses`
 | Column | Type | Notes |
@@ -185,8 +198,11 @@ Index: `index_expense_items_expenseId` on `expenseId`.
 | v1 → v2 | Creates `settlements` table |
 | v2 → v3 | Creates `expense_items` table + index |
 | v3 → v4 | Adds `isItemised INTEGER NOT NULL DEFAULT 0` to `expenses`; backfills to 1 for any expense already having rows in `expense_items` |
+| v4 → v5 | Adds `currencyCode TEXT NOT NULL DEFAULT 'INR'` to `groups` |
+| v5 → v6 | Adds `split_mode TEXT NOT NULL DEFAULT 'EQUAL'` to `expense_items` |
+| v6 → v7 | Creates `member_accounts` table + index; adds nullable `accountId TEXT` to `members` |
 
-All four migrations are registered in `AppDatabase.getInstance()`. Users upgrading from any prior version run the chain sequentially.
+All six migrations are registered in `AppDatabase.getInstance()`. Users upgrading from any prior version run the chain sequentially.
 
 ---
 
@@ -267,6 +283,12 @@ net formula per member:
 ```
 
 Positive `netBalance` → member is owed money. Negative → member owes money.
+
+### Linked accounts (`linkMembers` / `renameAccount` / `unlinkAccount`)
+Two or more members can be linked into a named `MemberAccount` (e.g. a couple). Each member still gets their own split share; only settle-up is combined.
+- `mergeBalancesByAccount(members, balances, accountNames)` (pure, `BalanceMath.kt`) folds linked members into one `MemberBalance` whose `memberId` is the **representative** (first linked member by name) and whose `memberIds` lists all of them. An accountId held by < 2 members is treated as solo.
+- `simplifyDebts` is fed merged balances, so a `DebtTransaction` from an account carries the representative id and the account name. Settlements are recorded against the representative; because the merge sums all linked members, the account total is correct regardless of which linked member holds a settlement.
+- `linkMembers`, `unlinkAccount`, and `deleteMember` (which dissolves an account left with < 2 members) each run in one transaction.
 
 ### `simplifyDebts(balances)`
 Greedy min-creditor / max-debtor algorithm. 0.01 epsilon terminates the loop. Loop bound is N² (N = member count).
@@ -489,6 +511,7 @@ File: `util/PdfExporter.kt`
 - Page 1: header bar, group title + description, date range, stats row (total / expense count / member count), member balances table, minimum payments, category bar chart.
 - Page 2+: expense detail — chronological, per-member split lines with percentage. For itemised expenses, a **BILL ITEMS sub-section** is rendered below the split lines showing `▸ item name → assigned names` and item amount.
 - Block height calculation includes `ITEM_LBL (9f) + items.size * ITEM_H (11f)` for itemised expenses to ensure correct page-break decisions.
+- **Linked accounts** get one row in the member-balances table (Paid/Share summed over `MemberBalance.memberIds`), followed by an indented `· name` sub-row per member with their own Paid/Share and no Balance (the account settles as one).
 - **Share column** = sum of raw `ExpenseSplit.amount` for that member (from `memberShareMap`), NOT derived from `netBalance`.
 - `export()` now takes `expenseItems: List<ExpenseItem> = emptyList()` — fetched fresh from DB by `GroupViewModel.exportPdf()` on `Dispatchers.IO`.
 - `parseJsonIds(json: String)` — private helper for deserialising `assignedMemberIds` JSON array.
@@ -542,6 +565,10 @@ Seeds 3 groups (Goa Trip / Flat Expenses / Office Lunch) with members and EQUAL-
 
 10. **`ExpenseItem.id` is stable across edits.** `updateExpenseWithItems` uses `OnConflictStrategy.REPLACE` on `expense_items`; items are upserted by primary key. Only IDs in `deletedItemIds` are DELETEd. New items added in the same session use fresh UUIDs that are not in `originalItemIds` and require no DELETE.
 
+11. **Never update a `Member` via `insertMember` (REPLACE).** REPLACE is DELETE + INSERT, and the DELETE cascades to `expense_splits`, silently wiping that member's splits. Use targeted `@Query UPDATE` (e.g. `setAccountId`).
+
+12. **Settle-up views use account-merged balances.** `simplifiedDebts`, the GroupScreen header "pending", `computePendingPerGroup` (home), and the PDF balance table all use `mergeBalancesByAccount` output. `calculateBalances` itself stays per member; per-person views (charts, total spend) use unmerged `balances`.
+
 ---
 
 ## Build & Run
@@ -549,6 +576,11 @@ Seeds 3 groups (Goa Trip / Flat Expenses / Office Lunch) with members and EQUAL-
 ```bash
 # Debug APK (output: app/build/outputs/apk/debug/FairShare-v1.0-debug.apk)
 ./gradlew assembleDebug
+
+# Signed release APK (output: app/build/outputs/apk/release/FairShare-v1.0-release.apk)
+# Needs RELEASE_STORE_FILE / RELEASE_STORE_PASSWORD / RELEASE_KEY_ALIAS / RELEASE_KEY_PASSWORD
+# in local.properties (gitignored). Without them the release APK is built unsigned.
+./gradlew assembleRelease
 
 # Install on connected device
 ./gradlew installDebug

@@ -22,9 +22,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -32,6 +35,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.splitexpense.data.db.entity.Category
 import com.splitexpense.data.db.entity.Expense
 import com.splitexpense.data.db.entity.Member
+import com.splitexpense.data.db.entity.MemberAccount
 import com.splitexpense.data.db.entity.Settlement
 import com.splitexpense.data.model.DebtTransaction
 import com.splitexpense.data.model.MemberBalance
@@ -189,7 +193,8 @@ fun GroupScreen(
             Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Border))
 
             // ── Stats Strip ───────────────────────────────────────────────────
-            val pendingAmt = state.balances.sumOf { if (it.netBalance < -0.01) -it.netBalance else 0.0 }
+            // Account-merged so debts between linked members don't count as pending.
+            val pendingAmt = state.accountBalances.sumOf { if (it.netBalance < -0.01) -it.netBalance else 0.0 }
             // Settled % = value already settled / (value settled + value still pending)
             val settledAmt  = state.settlements.sumOf { it.amount }
             val totalOwed   = settledAmt + state.simplifiedDebts.sumOf { it.amount }
@@ -274,18 +279,25 @@ fun GroupScreen(
                             onEdit                = { expense -> onEditExpense(expense.id) }
                         )
                         1 -> MembersTab(
+                            groupId             = groupId,
                             members             = state.members,
                             balances            = state.balances,
+                            accountBalances     = state.accountBalances,
+                            accounts            = state.accounts,
                             membersWithExpenses = state.membersWithExpenses,
                             currencySymbol      = currencySymbol,
                             onAddMember         = { showAddMemberDialog = true },
-                            onDeleteMember      = { viewModel.deleteMember(it) }
+                            onDeleteMember      = { viewModel.deleteMember(it) },
+                            onLinkMembers       = { name, ids -> viewModel.linkMembers(name, ids) },
+                            onRenameAccount     = { account, name -> viewModel.renameAccount(account, name) },
+                            onUnlinkAccount     = { viewModel.unlinkAccount(it) }
                         )
                         2 -> BalancesTab(
                             debts             = state.simplifiedDebts,
                             expenses          = state.expenses,
                             members           = state.members,
                             balances          = state.balances,
+                            accountBalances   = state.accountBalances,
                             settlements       = state.settlements,
                             splitsByExpenseId = state.splitsByExpenseId,
                             currencySymbol    = currencySymbol,
@@ -687,14 +699,37 @@ private fun ExpenseItem(
             ) {
                 if (hasItems) {
                     billItems.forEach { item ->
-                        val assignedIds = runCatching {
-                            val arr = org.json.JSONArray(item.assignedMemberIds)
-                            (0 until arr.length()).map { arr.getString(it) }
-                        }.getOrDefault(emptyList())
+                        val splitMode = runCatching {
+                            com.splitexpense.data.db.entity.ItemSplitMode.valueOf(item.splitMode)
+                        }.getOrDefault(com.splitexpense.data.db.entity.ItemSplitMode.EQUAL)
 
-                        val assignedNames = if (assignedIds.isEmpty()) "Everyone"
-                        else assignedIds.mapNotNull { memberMap[it]?.name }.joinToString(", ")
-                            .ifBlank { "Everyone" }
+                        val assignedNames = when (splitMode) {
+                            com.splitexpense.data.db.entity.ItemSplitMode.PERCENTAGE -> runCatching {
+                                val arr = org.json.JSONArray(item.assignedMemberIds)
+                                (0 until arr.length()).joinToString(" · ") { i ->
+                                    val obj = arr.getJSONObject(i)
+                                    val name = memberMap[obj.getString("id")]?.name ?: "?"
+                                    "$name ${"%.0f".format(obj.getDouble("w"))}%"
+                                }
+                            }.getOrDefault("Everyone")
+                            com.splitexpense.data.db.entity.ItemSplitMode.QUANTITY -> runCatching {
+                                val arr = org.json.JSONArray(item.assignedMemberIds)
+                                (0 until arr.length()).joinToString(" · ") { i ->
+                                    val obj = arr.getJSONObject(i)
+                                    val name = memberMap[obj.getString("id")]?.name ?: "?"
+                                    "$name ×${"%.2f".format(obj.getDouble("w")).trimEnd('0').trimEnd('.')}".trimEnd('.')
+                                }
+                            }.getOrDefault("Everyone")
+                            else -> {
+                                val assignedIds = runCatching {
+                                    val arr = org.json.JSONArray(item.assignedMemberIds)
+                                    (0 until arr.length()).map { arr.getString(it) }
+                                }.getOrDefault(emptyList())
+                                if (assignedIds.isEmpty()) "Everyone"
+                                else assignedIds.mapNotNull { memberMap[it]?.name }.joinToString(", ")
+                                    .ifBlank { "Everyone" }
+                            }
+                        }
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -746,33 +781,70 @@ private fun ExpenseItem(
 
 // ── Members Tab ───────────────────────────────────────────────────────────────
 
+/** One row of the Members tab: a solo member, or a linked account with its members. */
+private sealed interface MemberEntry {
+    data class Solo(val member: Member) : MemberEntry
+    data class Linked(val account: MemberAccount, val members: List<Member>) : MemberEntry
+}
+
 @Composable
 private fun MembersTab(
+    groupId: String,
     members: List<Member>,
     balances: List<MemberBalance>,
+    accountBalances: List<MemberBalance>,
+    accounts: List<MemberAccount>,
     membersWithExpenses: Set<String>,
     currencySymbol: String,
     onAddMember: () -> Unit,
-    onDeleteMember: (Member) -> Unit
+    onDeleteMember: (Member) -> Unit,
+    onLinkMembers: (name: String, memberIds: List<String>) -> Unit,
+    onRenameAccount: (MemberAccount, String) -> Unit,
+    onUnlinkAccount: (MemberAccount) -> Unit
 ) {
     val balanceMap = remember(balances) { balances.associateBy { it.memberId } }
+    // memberId → merged account balance (keyed by every member the balance covers)
+    val accountBalanceByMember = remember(accountBalances) {
+        accountBalances.flatMap { b -> b.memberIds.map { it to b } }.toMap()
+    }
+    // Same grouping rule as mergeBalancesByAccount: an accountId shared by < 2 members is solo.
+    val entries = remember(members, accounts) {
+        val accountById = accounts.associateBy { it.id }
+        val linked = members.filter { it.accountId != null }
+            .groupBy { it.accountId!! }
+            .filterValues { it.size >= 2 }
+        val emitted = mutableSetOf<String>()
+        members.mapNotNull { m ->
+            val accountId = m.accountId
+            val accountMembers = if (accountId != null) linked[accountId] else null
+            if (accountId == null || accountMembers == null) return@mapNotNull MemberEntry.Solo(m)
+            if (!emitted.add(accountId)) return@mapNotNull null
+            MemberEntry.Linked(
+                // Synthesised fallback keeps the card usable if the account row is missing.
+                account = accountById[accountId]
+                    ?: MemberAccount(accountId, groupId, accountMembers.joinToString(" & ") { it.name }),
+                members = accountMembers
+            )
+        }
+    }
+    val soloMembers = remember(entries) { entries.filterIsInstance<MemberEntry.Solo>().map { it.member } }
+
     var deletePending by remember { mutableStateOf<Member?>(null) }
+    var showLinkDialog by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<MemberAccount?>(null) }
+    var unlinkTarget by remember { mutableStateOf<MemberEntry.Linked?>(null) }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Add Member CTA — pinned at the top of the tab
-        Box(
+        // Add / Link CTAs — pinned at the top of the tab
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp)
-                .background(Surface3, RoundedCornerShape(10.dp))
-                .border(1.dp, BorderHi, RoundedCornerShape(10.dp))
-                .clickable(onClick = onAddMember)
-                .padding(12.dp),
-            contentAlignment = Alignment.Center
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(16.dp))
-                Text("Add Member", style = MaterialTheme.typography.labelLarge, color = NeonGreen, fontWeight = FontWeight.SemiBold)
+            MembersTabCta(Icons.Filled.PersonAdd, "Add Member", onAddMember, Modifier.weight(1f))
+            if (soloMembers.size >= 2) {
+                MembersTabCta(Icons.Filled.Link, "Link Members", { showLinkDialog = true }, Modifier.weight(1f))
             }
         }
 
@@ -789,18 +861,75 @@ private fun MembersTab(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier.weight(1f)
             ) {
-                items(members, key = { it.id }) { member ->
-                    MemberItem(
-                        member          = member,
-                        balance         = balanceMap[member.id]?.netBalance ?: 0.0,
-                        hasExpenses     = member.id in membersWithExpenses,
-                        currencySymbol  = currencySymbol,
-                        onDeleteRequest = { deletePending = member }
-                    )
+                items(entries, key = {
+                    when (it) {
+                        is MemberEntry.Solo   -> it.member.id
+                        is MemberEntry.Linked -> "acct_${it.account.id}"
+                    }
+                }) { entry ->
+                    when (entry) {
+                        is MemberEntry.Solo -> MemberItem(
+                            member          = entry.member,
+                            balance         = balanceMap[entry.member.id]?.netBalance ?: 0.0,
+                            hasExpenses     = entry.member.id in membersWithExpenses,
+                            currencySymbol  = currencySymbol,
+                            onDeleteRequest = { deletePending = entry.member }
+                        )
+                        is MemberEntry.Linked -> LinkedAccountCard(
+                            account             = entry.account,
+                            members             = entry.members,
+                            balance             = accountBalanceByMember[entry.members.first().id]?.netBalance ?: 0.0,
+                            membersWithExpenses = membersWithExpenses,
+                            currencySymbol      = currencySymbol,
+                            onRename            = { renameTarget = entry.account },
+                            onUnlink            = { unlinkTarget = entry },
+                            onDeleteRequest     = { deletePending = it }
+                        )
+                    }
                 }
                 item { Spacer(Modifier.height(40.dp)) }
             }
         }
+    }
+
+    if (showLinkDialog) {
+        LinkMembersDialog(
+            candidates = soloMembers,
+            onDismiss  = { showLinkDialog = false },
+            onLink     = { name, ids -> onLinkMembers(name, ids); showLinkDialog = false }
+        )
+    }
+
+    renameTarget?.let { account ->
+        RenameAccountDialog(
+            initialName = account.name,
+            onDismiss   = { renameTarget = null },
+            onSave      = { name -> onRenameAccount(account, name); renameTarget = null }
+        )
+    }
+
+    unlinkTarget?.let { entry ->
+        AlertDialog(
+            onDismissRequest  = { unlinkTarget = null },
+            containerColor    = Surface2,
+            titleContentColor = Text1,
+            textContentColor  = Text2,
+            title = { Text("Unlink account?") },
+            text  = {
+                Text(
+                    "\"${entry.account.name}\" will be split back into individual members who settle up separately. " +
+                    "Settlements already recorded for this account stay against ${entry.members.first().name}."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { onUnlinkAccount(entry.account); unlinkTarget = null }) {
+                    Text("Unlink", color = NeonRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { unlinkTarget = null }) { Text("Cancel", color = Text2) }
+            }
+        )
     }
 
     // Confirm before removing
@@ -824,19 +953,101 @@ private fun MembersTab(
     }
 }
 
+/** Balance badge text + colour shared by member rows and linked-account headers. */
+private fun balanceBadge(balance: Double, currencySymbol: String): Pair<String, Color> = when {
+    balance > 0.01  -> "+${formatCurrency(balance, currencySymbol)}" to NeonGreen
+    balance < -0.01 -> formatCurrency(balance, currencySymbol) to NeonRed
+    else            -> "Settled" to Text3
+}
+
 @Composable
-private fun MemberItem(member: Member, balance: Double, hasExpenses: Boolean, currencySymbol: String, onDeleteRequest: () -> Unit) {
+private fun MembersTabCta(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .background(Surface3, RoundedCornerShape(10.dp))
+            .border(1.dp, BorderHi, RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(icon, contentDescription = null, tint = NeonGreen, modifier = Modifier.size(16.dp))
+            Text(label, style = MaterialTheme.typography.labelLarge, color = NeonGreen, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+/** Linked members who settle up as one party: header with combined balance, then each member. */
+@Composable
+private fun LinkedAccountCard(
+    account: MemberAccount,
+    members: List<Member>,
+    balance: Double,
+    membersWithExpenses: Set<String>,
+    currencySymbol: String,
+    onRename: () -> Unit,
+    onUnlink: () -> Unit,
+    onDeleteRequest: (Member) -> Unit
+) {
+    val (balText, balColor) = balanceBadge(balance, currencySymbol)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Surface1, RoundedCornerShape(14.dp))
+            .border(1.dp, BorderHi, RoundedCornerShape(14.dp))
+            .padding(8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 6.dp, top = 2.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(Icons.Filled.Link, contentDescription = null, tint = AmberAccent, modifier = Modifier.size(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    account.name, style = MaterialTheme.typography.titleSmall, color = Text1,
+                    fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    "SETTLES AS ONE · ${members.size} MEMBERS", style = MaterialTheme.typography.labelSmall,
+                    color = Text3, letterSpacing = 0.8.sp
+                )
+            }
+            Text(balText, style = MaterialTheme.typography.labelMedium, color = balColor, fontWeight = FontWeight.Bold)
+            SmallIconBtn(onClick = onRename) {
+                Icon(Icons.Filled.Edit, contentDescription = "Rename account", tint = Text2, modifier = Modifier.size(14.dp))
+            }
+            SmallIconBtn(onClick = onUnlink) {
+                Icon(Icons.Filled.LinkOff, contentDescription = "Unlink account", tint = Text2, modifier = Modifier.size(14.dp))
+            }
+        }
+        members.forEach { member ->
+            MemberItem(
+                member          = member,
+                balance         = 0.0,
+                hasExpenses     = member.id in membersWithExpenses,
+                currencySymbol  = currencySymbol,
+                onDeleteRequest = { onDeleteRequest(member) },
+                // Individual nets are misleading inside an account: settlements are recorded
+                // against the representative member only. The header shows the true total.
+                showBalance     = false
+            )
+        }
+    }
+}
+
+@Composable
+private fun MemberItem(
+    member: Member,
+    balance: Double,
+    hasExpenses: Boolean,
+    currencySymbol: String,
+    onDeleteRequest: () -> Unit,
+    showBalance: Boolean = true
+) {
     val initials = member.name.split(" ").take(2).joinToString("") { it.firstOrNull()?.uppercase() ?: "" }
-    val balColor = when {
-        balance > 0.01  -> NeonGreen
-        balance < -0.01 -> NeonRed
-        else            -> Text3
-    }
-    val balText = when {
-        balance > 0.01  -> "+${formatCurrency(balance, currencySymbol)}"
-        balance < -0.01 -> formatCurrency(balance, currencySymbol)
-        else            -> "Settled"
-    }
+    val (balText, balColor) = balanceBadge(balance, currencySymbol)
 
     Row(
         modifier = Modifier
@@ -864,7 +1075,9 @@ private fun MemberItem(member: Member, balance: Double, hasExpenses: Boolean, cu
         }
 
         // Balance badge
-        Text(balText, style = MaterialTheme.typography.labelMedium, color = balColor, fontWeight = FontWeight.Bold)
+        if (showBalance) {
+            Text(balText, style = MaterialTheme.typography.labelMedium, color = balColor, fontWeight = FontWeight.Bold)
+        }
 
         // Remove button — locked if member is on any expense/split
         if (hasExpenses) {
@@ -901,14 +1114,19 @@ private fun MemberTotalSpendItem(
     effectiveCost: Double,
     netBalance: Double,
     breakdown: List<Pair<String, Double>>,
-    currencySymbol: String
+    currencySymbol: String,
+    /** Non-null when this member settles as part of a linked account. */
+    accountName: String? = null
 ) {
     var expanded by remember { mutableStateOf(false) }
     val isOwed = netBalance > 0.01
     val owes   = netBalance < -0.01
 
-    // e.g. "Paid ₹1,000 − gets back ₹300" or "Paid ₹200 + owes ₹500"
+    // e.g. "Paid ₹1,000 − gets back ₹300" or "Paid ₹200 + owes ₹500".
+    // Linked members' individual nets are misleading (settlements land on the account's
+    // representative), so they show the account they settle through instead.
     val formula = when {
+        accountName != null -> "Paid ${formatCurrency(totalPaid, currencySymbol)} · part of $accountName"
         isOwed -> "Paid ${formatCurrency(totalPaid, currencySymbol)} − gets back ${formatCurrency(netBalance, currencySymbol)}"
         owes   -> "Paid ${formatCurrency(totalPaid, currencySymbol)} + owes ${formatCurrency(-netBalance, currencySymbol)}"
         else   -> "Paid ${formatCurrency(totalPaid, currencySymbol)}"
@@ -951,12 +1169,16 @@ private fun MemberTotalSpendItem(
                     member.name,
                     style = MaterialTheme.typography.bodySmall,
                     color = Text1,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     formula,
                     style = MaterialTheme.typography.labelSmall,
-                    color = Text3
+                    color = Text3,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
@@ -1029,9 +1251,9 @@ private fun MemberNetBalanceItem(bal: MemberBalance) {
             .fillMaxWidth()
             .background(Surface2, RoundedCornerShape(12.dp))
             .border(1.dp, Border, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(start = 14.dp, end = 10.dp, top = 10.dp, bottom = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         // Avatar
         val initials = bal.memberName.split(" ").take(2).joinToString("") { it.firstOrNull()?.uppercase() ?: "" }
@@ -1054,22 +1276,25 @@ private fun MemberNetBalanceItem(bal: MemberBalance) {
             modifier = Modifier.weight(1f)
         )
 
-        // Label chip
-        Box(
-            modifier = Modifier
-                .background(chipBg, RoundedCornerShape(6.dp))
-                .border(1.dp, chipBdr, RoundedCornerShape(6.dp))
-                .padding(horizontal = 8.dp, vertical = 3.dp)
+        // Amount + label stacked — uses only the width of the wider item
+        Column(
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(3.dp)
         ) {
-            Text(labelText, style = MaterialTheme.typography.labelSmall, color = amtColor)
+            Text(
+                amtText,
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                color = amtColor
+            )
+            Box(
+                modifier = Modifier
+                    .background(chipBg, RoundedCornerShape(6.dp))
+                    .border(1.dp, chipBdr, RoundedCornerShape(6.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(labelText, style = MaterialTheme.typography.labelSmall, color = amtColor)
+            }
         }
-
-        // Amount
-        Text(
-            amtText,
-            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-            color = amtColor
-        )
     }
 }
 
@@ -1081,6 +1306,7 @@ private fun BalancesTab(
     expenses: List<Expense>,
     members: List<Member>,
     balances: List<MemberBalance>,
+    accountBalances: List<MemberBalance>,
     settlements: List<Settlement>,
     splitsByExpenseId: Map<String, List<com.splitexpense.data.db.entity.ExpenseSplit>>,
     currencySymbol: String,
@@ -1088,6 +1314,12 @@ private fun BalancesTab(
     onUndoSettle: (Settlement) -> Unit
 ) {
     var settleTarget by remember { mutableStateOf<DebtTransaction?>(null) }
+    // memberId → linked account name, for members that settle as part of an account.
+    val accountNameByMember = remember(accountBalances) {
+        accountBalances.filter { it.memberIds.size > 1 }
+            .flatMap { b -> b.memberIds.map { it to b.memberName } }
+            .toMap()
+    }
     // Per-member total paid, sorted highest → lowest.
     val (memberSpend, totalSpent, maxSpend) = remember(expenses, members) {
         val spend = members
@@ -1150,7 +1382,8 @@ private fun BalancesTab(
                     effectiveCost = effectiveCost,
                     netBalance    = net,
                     breakdown     = memberBreakdown[member.id]?.sortedByDescending { it.second } ?: emptyList(),
-                    currencySymbol = currencySymbol
+                    currencySymbol = currencySymbol,
+                    accountName   = accountNameByMember[member.id]
                 )
             }
             item(key = "total_spend_divider") {
@@ -1364,14 +1597,17 @@ private fun MemberSpendItem(
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
                     member.name,
                     style = MaterialTheme.typography.bodySmall,
                     color = Text1,
-                    fontWeight = FontWeight.SemiBold
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
                 )
                 Text(
                     formatCurrency(spent, currencySymbol),
@@ -1437,11 +1673,14 @@ private fun DebtItem(debt: DebtTransaction, currencySymbol: String, onSettle: ()
 
         // Description
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(debt.fromName, style = MaterialTheme.typography.bodySmall, color = NeonRed, fontWeight = FontWeight.SemiBold)
-                Text(" owes ", style = MaterialTheme.typography.bodySmall, color = Text3)
-                Text(debt.toName, style = MaterialTheme.typography.bodySmall, color = NeonGreen, fontWeight = FontWeight.SemiBold)
-            }
+            Text(
+                text = buildAnnotatedString {
+                    withStyle(SpanStyle(color = NeonRed, fontWeight = FontWeight.SemiBold)) { append(debt.fromName) }
+                    withStyle(SpanStyle(color = Text3)) { append(" owes ") }
+                    withStyle(SpanStyle(color = NeonGreen, fontWeight = FontWeight.SemiBold)) { append(debt.toName) }
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
             Text(
                 formatCurrency(debt.amount, currencySymbol),
                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
@@ -1508,21 +1747,14 @@ private fun SettledItem(settlement: Settlement, currencySymbol: String, onUndo: 
 
         // Description
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    settlement.fromName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Text1,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(" paid ", style = MaterialTheme.typography.bodySmall, color = Text3)
-                Text(
-                    settlement.toName,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Text1,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
+            Text(
+                text = buildAnnotatedString {
+                    withStyle(SpanStyle(color = Text1, fontWeight = FontWeight.SemiBold)) { append(settlement.fromName) }
+                    withStyle(SpanStyle(color = Text3)) { append(" paid ") }
+                    withStyle(SpanStyle(color = Text1, fontWeight = FontWeight.SemiBold)) { append(settlement.toName) }
+                },
+                style = MaterialTheme.typography.bodySmall
+            )
             Text(
                 "${formatCurrency(settlement.amount, currencySymbol)} · ${fmt.format(java.util.Date(settlement.date))}",
                 style = MaterialTheme.typography.labelSmall,
@@ -1817,6 +2049,118 @@ private fun EditGroupDialog(
         confirmButton = {
             Button(
                 onClick = { if (name.isNotBlank()) onSave(name, description, emoji) },
+                enabled = name.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Bg)
+            ) { Text("Save", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Text2) } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun LinkMembersDialog(
+    candidates: List<Member>,
+    onDismiss: () -> Unit,
+    onLink: (name: String, memberIds: List<String>) -> Unit
+) {
+    var selected by remember { mutableStateOf(setOf<String>()) }
+    var name by remember { mutableStateOf("") }
+    // Name auto-fills from the selection ("A & B") until the user types their own.
+    var nameEdited by remember { mutableStateOf(false) }
+
+    fun toggle(id: String) {
+        selected = if (id in selected) selected - id else selected + id
+        if (!nameEdited) name = candidates.filter { it.id in selected }.joinToString(" & ") { it.name }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Surface2,
+        titleContentColor = Text1,
+        textContentColor = Text2,
+        title = { Text("Link Members") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "Linked members keep their own share of each expense but settle up as one account.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Text3
+                )
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it; nameEdited = it.isNotEmpty() },
+                    label = { Text("Account name *", color = Text3) },
+                    placeholder = { Text("e.g. The Bhagats", color = Text3) },
+                    singleLine = true,
+                    colors = darkFieldColors(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Column(
+                    modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    candidates.forEach { member ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { toggle(member.id) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Checkbox(
+                                checked = member.id in selected,
+                                onCheckedChange = { toggle(member.id) },
+                                colors = CheckboxDefaults.colors(
+                                    checkedColor = NeonGreen, uncheckedColor = Text3, checkmarkColor = Bg
+                                )
+                            )
+                            Text(member.name, color = Text1, style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onLink(name.trim(), candidates.filter { it.id in selected }.map { it.id }) },
+                enabled = selected.size >= 2 && name.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Bg)
+            ) { Text("Link", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Text2) } }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameAccountDialog(
+    initialName: String,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Surface2,
+        titleContentColor = Text1,
+        textContentColor = Text2,
+        title = { Text("Rename Account") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Account name *", color = Text3) },
+                singleLine = true,
+                colors = darkFieldColors(),
+                modifier = Modifier.fillMaxWidth()
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = { if (name.isNotBlank()) onSave(name.trim()) },
                 enabled = name.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(containerColor = NeonGreen, contentColor = Bg)
             ) { Text("Save", fontWeight = FontWeight.Bold) }

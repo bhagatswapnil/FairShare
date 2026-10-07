@@ -9,7 +9,7 @@ import androidx.room.PrimaryKey
 enum class SplitType { EQUAL, PERCENTAGE, AMOUNT }
 
 enum class Category {
-    FOOD, TRAVEL, UTILITIES, ENTERTAINMENT, SHOPPING, HEALTH, OTHER
+    FOOD, TRAVEL, UTILITIES, ENTERTAINMENT, SHOPPING, HEALTH, DRINKS, BEVERAGES, OTHER
 }
 
 @Entity(

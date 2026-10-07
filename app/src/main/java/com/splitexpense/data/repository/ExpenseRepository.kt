@@ -5,10 +5,13 @@ import com.splitexpense.data.db.AppDatabase
 import com.splitexpense.data.db.entity.*
 import com.splitexpense.data.model.DebtTransaction
 import com.splitexpense.data.model.MemberBalance
+import com.splitexpense.data.model.mergeBalancesByAccount
 import kotlin.math.round
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import com.splitexpense.data.db.entity.ItemSplitMode
 import org.json.JSONArray
+import org.json.JSONObject
 import java.util.UUID
 
 /** Describes one line item from a scanned bill for use with [addExpenseWithItems]. */
@@ -16,9 +19,13 @@ data class BillItemData(
     /** Stable row ID — preserved from the DB for existing items, fresh UUID for new ones. */
     val id: String = UUID.randomUUID().toString(),
     val name: String,
+    /** Always the **total** cost for this item (unit × qty for QUANTITY mode). */
     val amount: Double,
-    /** Member IDs assigned to this item. Empty = split among all [allMemberIds]. */
-    val assignedMemberIds: List<String>
+    /** Member IDs — used only when [splitMode] is EQUAL. Empty = all [allMemberIds]. */
+    val assignedMemberIds: List<String>,
+    val splitMode: ItemSplitMode = ItemSplitMode.EQUAL,
+    /** For PERCENTAGE: memberId→percentage (sum≈100). For QUANTITY: memberId→unit count. */
+    val memberWeights: Map<String, Double> = emptyMap()
 )
 
 class ExpenseRepository(private val db: AppDatabase) {
@@ -80,7 +87,48 @@ class ExpenseRepository(private val db: AppDatabase) {
         )
     }
 
-    suspend fun deleteMember(member: Member) = db.memberDao().deleteMember(member)
+    /** Deletes the member; dissolves their linked account if fewer than two members would remain. */
+    suspend fun deleteMember(member: Member) {
+        db.withTransaction {
+            db.memberDao().deleteMember(member)
+            val accountId = member.accountId ?: return@withTransaction
+            val remaining = db.memberDao().getMembersInAccount(accountId)
+            if (remaining.size < 2) {
+                db.memberDao().setAccountId(remaining.map { it.id }, null)
+                db.memberAccountDao().getAccountById(accountId)?.let { db.memberAccountDao().deleteAccount(it) }
+            }
+        }
+    }
+
+    // ─── Linked accounts ───────────────────────────────────────────────────────
+
+    fun getAccountsForGroup(groupId: String): Flow<List<MemberAccount>> =
+        db.memberAccountDao().getAccountsForGroup(groupId)
+
+    /** Links [memberIds] (≥ 2) into a new named account that settles up as one party. */
+    suspend fun linkMembers(groupId: String, name: String, memberIds: List<String>) {
+        require(memberIds.size >= 2) { "An account needs at least two members" }
+        require(name.isNotBlank()) { "Account name is required" }
+        val account = MemberAccount(UUID.randomUUID().toString(), groupId, name.trim())
+        db.withTransaction {
+            db.memberAccountDao().insertAccount(account)
+            db.memberDao().setAccountId(memberIds, account.id)
+        }
+    }
+
+    suspend fun renameAccount(account: MemberAccount, newName: String) {
+        require(newName.isNotBlank()) { "Account name is required" }
+        db.memberAccountDao().updateAccount(account.copy(name = newName.trim()))
+    }
+
+    /** Returns every linked member to solo and removes the account row. */
+    suspend fun unlinkAccount(account: MemberAccount) {
+        db.withTransaction {
+            val ids = db.memberDao().getMembersInAccount(account.id).map { it.id }
+            db.memberDao().setAccountId(ids, null)
+            db.memberAccountDao().deleteAccount(account)
+        }
+    }
 
     // ─── Expenses ──────────────────────────────────────────────────────────────
 
@@ -193,12 +241,7 @@ class ExpenseRepository(private val db: AppDatabase) {
         // each member's total is rounded once (not per-item), keeping sum(splits)
         // as close to expense.amount as floating-point allows.
         val memberTotals = mutableMapOf<String, Double>()
-        items.forEach { item ->
-            val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
-            if (assignees.isEmpty()) return@forEach
-            val share = item.amount / assignees.size
-            assignees.forEach { id -> memberTotals[id] = (memberTotals[id] ?: 0.0) + share }
-        }
+        items.forEach { item -> accumulateShares(item, allMemberIds, memberTotals) }
 
         db.withTransaction {
             db.expenseDao().insertExpense(
@@ -225,13 +268,13 @@ class ExpenseRepository(private val db: AppDatabase) {
             )
             db.expenseItemDao().insertItems(
                 items.map { item ->
-                    val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
                     ExpenseItem(
-                        id                = item.id,   // stable ID from BillItemData
+                        id                = item.id,
                         expenseId         = expenseId,
                         name              = item.name,
                         amount            = item.amount,
-                        assignedMemberIds = JSONArray(assignees).toString()
+                        assignedMemberIds = serializeItemAssignments(item, allMemberIds),
+                        splitMode         = item.splitMode.name
                     )
                 }
             )
@@ -255,12 +298,7 @@ class ExpenseRepository(private val db: AppDatabase) {
         val totalAmount = items.sumOf { it.amount }
 
         val memberTotals = mutableMapOf<String, Double>()
-        items.forEach { item ->
-            val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
-            if (assignees.isEmpty()) return@forEach
-            val share = item.amount / assignees.size
-            assignees.forEach { id -> memberTotals[id] = (memberTotals[id] ?: 0.0) + share }
-        }
+        items.forEach { item -> accumulateShares(item, allMemberIds, memberTotals) }
 
         db.withTransaction {
             db.expenseDao().updateExpense(
@@ -277,20 +315,18 @@ class ExpenseRepository(private val db: AppDatabase) {
                     )
                 }
             )
-            // Delete only the items the user explicitly removed — preserves untouched rows.
             if (deletedItemIds.isNotEmpty()) {
                 db.expenseItemDao().deleteItemsByIds(deletedItemIds)
             }
-            // Upsert current items: REPLACE updates existing rows, inserts new ones.
             db.expenseItemDao().insertItems(
                 items.map { item ->
-                    val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
                     ExpenseItem(
-                        id                = item.id,   // stable ID preserves row identity
+                        id                = item.id,
                         expenseId         = expense.id,
                         name              = item.name,
                         amount            = item.amount,
-                        assignedMemberIds = JSONArray(assignees).toString()
+                        assignedMemberIds = serializeItemAssignments(item, allMemberIds),
+                        splitMode         = item.splitMode.name
                     )
                 }
             )
@@ -348,70 +384,20 @@ class ExpenseRepository(private val db: AppDatabase) {
 
     // ─── Balance helpers ───────────────────────────────────────────────────────
 
-    /**
-     * Computes the net balance for every member in the group.
-     *
-     *   net = amount_paid_by_member − amount_owed_by_member
-     *       + amount_settled_out (member paid someone) − amount_settled_in (member received)
-     *
-     * Positive net  → this member is owed money.
-     * Negative net  → this member owes money.
-     *
-     * @param settlements Pass the group's settlement list to factor in recorded payments.
-     *                    Defaults to empty (original balance with no settlements).
-     */
+    // Implementations live in data/model/BalanceMath.kt as pure functions (unit-testable).
+
+    /** Per-member net balances. See [com.splitexpense.data.model.calculateBalances]. */
     fun calculateBalances(
         members: List<Member>,
         expenses: List<Expense>,
         splits: List<ExpenseSplit>,
         settlements: List<Settlement> = emptyList()
-    ): List<MemberBalance> {
-        val net = members.associate { it.id to 0.0 }.toMutableMap()
+    ): List<MemberBalance> =
+        com.splitexpense.data.model.calculateBalances(members, expenses, splits, settlements)
 
-        // Only credit/debit members that still exist; orphaned IDs (deleted members) are ignored
-        // so that their phantom entries don't corrupt the balances of surviving members.
-        expenses.forEach { e ->
-            if (e.paidById in net) net[e.paidById] = net.getValue(e.paidById) + e.amount
-        }
-        splits.forEach { s ->
-            if (s.memberId in net) net[s.memberId] = net.getValue(s.memberId) - s.amount
-        }
-        settlements.forEach { s ->
-            if (s.fromId in net) net[s.fromId] = net.getValue(s.fromId) + s.amount
-            if (s.toId   in net) net[s.toId]   = net.getValue(s.toId)   - s.amount
-        }
-
-        return members.map { m ->
-            MemberBalance(m.id, m.name, m.avatarColor, net[m.id] ?: 0.0)
-        }
-    }
-
-    fun simplifyDebts(balances: List<MemberBalance>): List<DebtTransaction> {
-        val net = balances.map { it.memberId to it.netBalance }.toMutableList()
-        val memberName = balances.associate { it.memberId to it.memberName }
-        val transactions = mutableListOf<DebtTransaction>()
-
-        repeat(net.size * net.size) {
-            val creditor = net.maxByOrNull { it.second } ?: return transactions
-            val debtor   = net.minByOrNull { it.second } ?: return transactions
-            if (creditor.second < 0.01 || debtor.second > -0.01) return transactions
-
-            val amount = minOf(creditor.second, -debtor.second)
-            transactions += DebtTransaction(
-                debtor.first,
-                memberName[debtor.first]   ?: "",
-                creditor.first,
-                memberName[creditor.first] ?: "",
-                amount
-            )
-
-            val ci = net.indexOfFirst { it.first == creditor.first }
-            val di = net.indexOfFirst { it.first == debtor.first }
-            net[ci] = creditor.first to creditor.second - amount
-            net[di] = debtor.first  to debtor.second  + amount
-        }
-        return transactions
-    }
+    /** Pass account-merged balances so linked members settle as one party. */
+    fun simplifyDebts(balances: List<MemberBalance>): List<DebtTransaction> =
+        com.splitexpense.data.model.simplifyDebts(balances)
 
     fun categorySpending(
         expenses: List<Expense>,
@@ -453,9 +439,60 @@ class ExpenseRepository(private val db: AppDatabase) {
             val gSplits      = allSplits.filter { it.expenseId in gExpenseIds }
             val gSettlements = allSettlements[group.id]  ?: emptyList()
 
-            val balances = calculateBalances(gMembers, gExpenses, gSplits, gSettlements)
+            // Merge linked accounts first so debts between linked members don't count as pending.
+            val balances = mergeBalancesByAccount(
+                gMembers, calculateBalances(gMembers, gExpenses, gSplits, gSettlements)
+            )
             val pending  = balances.filter { it.netBalance > 0.01 }.sumOf { it.netBalance }
             group.id to pending
         }
     }
+
+    // ─── Item split helpers ────────────────────────────────────────────────────
+
+    /** Adds each item's per-member share to [totals], accumulating unrounded. */
+    private fun accumulateShares(
+        item: BillItemData,
+        allMemberIds: List<String>,
+        totals: MutableMap<String, Double>
+    ) {
+        when (item.splitMode) {
+            ItemSplitMode.PERCENTAGE -> {
+                val totalPct = item.memberWeights.values.sum()
+                if (totalPct <= 0) return
+                item.memberWeights.forEach { (id, pct) ->
+                    if (pct > 0) totals[id] = (totals[id] ?: 0.0) + item.amount * pct / totalPct
+                }
+            }
+            ItemSplitMode.QUANTITY -> {
+                val totalQty = item.memberWeights.values.sum()
+                if (totalQty <= 0) return
+                item.memberWeights.forEach { (id, qty) ->
+                    if (qty > 0) totals[id] = (totals[id] ?: 0.0) + item.amount * qty / totalQty
+                }
+            }
+            ItemSplitMode.EQUAL -> {
+                val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+                if (assignees.isEmpty()) return
+                val share = item.amount / assignees.size
+                assignees.forEach { id -> totals[id] = (totals[id] ?: 0.0) + share }
+            }
+        }
+    }
+
+    /** Serialises item assignments to the JSON format expected by [ExpenseItem.assignedMemberIds]. */
+    private fun serializeItemAssignments(item: BillItemData, allMemberIds: List<String>): String =
+        when (item.splitMode) {
+            ItemSplitMode.EQUAL -> {
+                val assignees = item.assignedMemberIds.ifEmpty { allMemberIds }
+                JSONArray(assignees).toString()
+            }
+            else -> {
+                val arr = JSONArray()
+                item.memberWeights.filter { it.value > 0 }.forEach { (id, w) ->
+                    arr.put(JSONObject().put("id", id).put("w", w))
+                }
+                arr.toString()
+            }
+        }
 }

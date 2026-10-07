@@ -34,6 +34,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.splitexpense.data.db.entity.Category
+import com.splitexpense.data.db.entity.ItemSplitMode
 import com.splitexpense.data.db.entity.Member
 import com.splitexpense.ui.components.ApiKeyDialog
 import com.splitexpense.ui.screens.home.darkFieldColors
@@ -152,6 +153,9 @@ fun ScanBillScreen(
                     onItemNameChange      = viewModel::onItemNameChange,
                     onItemAmountChange    = viewModel::onItemAmountChange,
                     onToggleMember        = viewModel::onToggleMember,
+                    onSplitModeChange     = viewModel::onItemSplitModeChange,
+                    onWeightChange        = viewModel::onItemWeightChange,
+                    onDiscountToggle      = viewModel::onItemDiscountToggle,
                     onAddItem             = viewModel::addItem,
                     onRemoveItem          = viewModel::removeItem,
                     onSave                = viewModel::saveExpense
@@ -285,6 +289,9 @@ private fun ReviewPhase(
     onItemNameChange: (Int, String) -> Unit,
     onItemAmountChange: (Int, String) -> Unit,
     onToggleMember: (Int, String) -> Unit,
+    onSplitModeChange: (Int, ItemSplitMode) -> Unit,
+    onWeightChange: (Int, String, String) -> Unit,
+    onDiscountToggle: (Int) -> Unit,
     onAddItem: () -> Unit,
     onRemoveItem: (Int) -> Unit,
     onSave: () -> Unit
@@ -322,14 +329,17 @@ private fun ReviewPhase(
 
         state.items.forEachIndexed { index, item ->
             BillItemRow(
-                item       = item,
-                index      = index,
-                members    = state.members,
-                currencySymbol = state.currencySymbol,
-                onNameChange   = { onItemNameChange(index, it) },
-                onAmountChange = { onItemAmountChange(index, it) },
-                onToggleMember = { onToggleMember(index, it) },
-                onRemove   = { onRemoveItem(index) }
+                item              = item,
+                index             = index,
+                members           = state.members,
+                currencySymbol    = state.currencySymbol,
+                onNameChange      = { onItemNameChange(index, it) },
+                onAmountChange    = { onItemAmountChange(index, it) },
+                onToggleMember    = { onToggleMember(index, it) },
+                onSplitModeChange = { onSplitModeChange(index, it) },
+                onWeightChange    = { memberId, v -> onWeightChange(index, memberId, v) },
+                onDiscountToggle  = { onDiscountToggle(index) },
+                onRemove          = { onRemoveItem(index) }
             )
         }
 
@@ -445,6 +455,7 @@ private fun ReviewPhase(
 
 // ── Bill item row ─────────────────────────────────────────────────────────────
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun BillItemRow(
     item: BillItemState,
@@ -454,17 +465,21 @@ private fun BillItemRow(
     onNameChange: (String) -> Unit,
     onAmountChange: (String) -> Unit,
     onToggleMember: (String) -> Unit,
+    onSplitModeChange: (ItemSplitMode) -> Unit,
+    onWeightChange: (memberId: String, value: String) -> Unit,
+    onDiscountToggle: () -> Unit,
     onRemove: () -> Unit
 ) {
+    val amtColor = if (item.isDiscount) NeonRed else Text1
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Surface2, RoundedCornerShape(12.dp))
-            .border(1.dp, Border, RoundedCornerShape(12.dp))
+            .border(1.dp, if (item.isDiscount) NeonRed.copy(alpha = 0.35f) else Border, RoundedCornerShape(12.dp))
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // Name + Amount + Remove
+        // Name + Amount + Discount toggle + Remove
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -487,13 +502,29 @@ private fun BillItemRow(
                 onValueChange = { v ->
                     if (v.isEmpty() || v.matches(Regex("^\\d*\\.?\\d{0,2}$"))) onAmountChange(v)
                 },
-                prefix = { Text(currencySymbol, color = Text3, style = MaterialTheme.typography.bodySmall) },
+                placeholder = { Text("0.00", color = Text3, style = MaterialTheme.typography.bodySmall) },
+                prefix = { Text(if (item.isDiscount) "-$currencySymbol" else currencySymbol, color = amtColor, style = MaterialTheme.typography.bodySmall) },
+                suffix = if (item.splitMode == ItemSplitMode.QUANTITY) {
+                    { Text("/unit", color = Text3, style = MaterialTheme.typography.labelSmall) }
+                } else null,
                 singleLine = true,
                 colors = darkFieldColors(),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.width(100.dp),
-                textStyle = MaterialTheme.typography.bodySmall.copy(color = Text1)
+                modifier = Modifier.width(110.dp),
+                textStyle = MaterialTheme.typography.bodySmall.copy(color = amtColor)
             )
+            // Discount toggle (-/+)
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(if (item.isDiscount) NeonRedDim else Surface3, RoundedCornerShape(8.dp))
+                    .border(1.dp, if (item.isDiscount) NeonRed.copy(alpha = 0.4f) else Border, RoundedCornerShape(8.dp))
+                    .clickable(onClick = onDiscountToggle),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(if (item.isDiscount) "−" else "+/−", color = if (item.isDiscount) NeonRed else Text3,
+                    style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+            }
             Box(
                 modifier = Modifier
                     .size(32.dp)
@@ -506,51 +537,150 @@ private fun BillItemRow(
             }
         }
 
-        // Member assignment chips
+        // Split mode toggle: = | % | qty
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Surface3, RoundedCornerShape(8.dp))
+                .padding(2.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            ItemSplitMode.entries.forEach { mode ->
+                val selected = item.splitMode == mode
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (selected) NeonGreen else Color.Transparent)
+                        .clickable { onSplitModeChange(mode) }
+                        .padding(vertical = 5.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        when (mode) {
+                            ItemSplitMode.EQUAL -> "="
+                            ItemSplitMode.PERCENTAGE -> "%"
+                            ItemSplitMode.QUANTITY -> "qty"
+                        },
+                        color = if (selected) Bg else Text3,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
+                    )
+                }
+            }
+        }
+
+        // Member section — varies by mode
         if (members.isNotEmpty()) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Text("For:", color = Text3, style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.width(24.dp))
-                members.forEach { member ->
-                    val assigned = member.id in item.assignedMemberIds
-                    val isAll    = item.assignedMemberIds.isEmpty()
-                    val active   = assigned || isAll
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(6.dp))
-                            .background(if (active) NeonGreenDim else Surface3)
-                            .border(
-                                1.dp,
-                                if (active) NeonGreen.copy(alpha = 0.6f) else Border,
-                                RoundedCornerShape(6.dp)
-                            )
-                            .clickable { onToggleMember(member.id) }
-                            .padding(horizontal = 8.dp, vertical = 4.dp)
+            when (item.splitMode) {
+                ItemSplitMode.EQUAL -> {
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
+                        Text("For:", color = Text3, style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.width(24.dp))
+                        members.forEach { member ->
+                            val active = member.id in item.assignedMemberIds
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .background(if (active) NeonGreenDim else Surface3)
+                                    .border(1.dp,
+                                        if (active) NeonGreen.copy(alpha = 0.6f) else Border,
+                                        RoundedCornerShape(6.dp))
+                                    .clickable { onToggleMember(member.id) }
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(member.name.take(8),
+                                    color = if (active) NeonGreen else Text3,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal)
+                            }
+                        }
+                    }
+                    val assigneeCount = item.assignedMemberIds.size
+                    val amt = item.parsedAmount
+                    if (amt > 0.01 && assigneeCount > 1) {
+                        Text("${formatCurrency(amt / assigneeCount, currencySymbol)}/person",
+                            color = Text3, style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 30.dp))
+                    }
+                }
+
+                ItemSplitMode.PERCENTAGE -> {
+                    val totalPct = item.memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                    val pctOk = kotlin.math.abs(totalPct - 100.0) < 0.5
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        members.forEach { member ->
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(member.name.take(10), color = Text2,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f))
+                                OutlinedTextField(
+                                    value = item.memberWeights[member.id] ?: "",
+                                    onValueChange = { v ->
+                                        if (v.isEmpty() || v.matches(Regex("^\\d*\\.?\\d{0,2}$")))
+                                            onWeightChange(member.id, v)
+                                    },
+                                    placeholder = { Text("0", color = Text3,
+                                        style = MaterialTheme.typography.labelSmall) },
+                                    suffix = { Text("%", color = Text3,
+                                        style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true,
+                                    colors = darkFieldColors(),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.width(80.dp),
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(color = Text1)
+                                )
+                            }
+                        }
                         Text(
-                            member.name.take(8),
-                            color = if (active) NeonGreen else Text3,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal
+                            "Total: ${"%.1f".format(totalPct)}% ${if (pctOk) "✓" else "— must equal 100%"}",
+                            color = if (pctOk) NeonGreen else NeonRed,
+                            style = MaterialTheme.typography.labelSmall
                         )
                     }
                 }
-            }
-            // Show per-person share
-            val amt = item.parsedAmount
-            val assigneeCount = if (item.assignedMemberIds.isEmpty()) members.size
-                                else item.assignedMemberIds.size
-            if (amt > 0.01 && assigneeCount > 1) {
-                Text(
-                    "${formatCurrency(amt / assigneeCount, currencySymbol)}/person",
-                    color = Text3,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(start = 30.dp)
-                )
+
+                ItemSplitMode.QUANTITY -> {
+                    val totalQty = item.memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                    val unitPrice = item.amount.toDoubleOrNull() ?: 0.0
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        members.forEach { member ->
+                            Row(verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(member.name.take(10), color = Text2,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier.weight(1f))
+                                OutlinedTextField(
+                                    value = item.memberWeights[member.id] ?: "",
+                                    onValueChange = { v ->
+                                        if (v.isEmpty() || v.matches(Regex("^\\d*\\.?\\d{0,2}$")))
+                                            onWeightChange(member.id, v)
+                                    },
+                                    placeholder = { Text("0", color = Text3,
+                                        style = MaterialTheme.typography.labelSmall) },
+                                    suffix = { Text("×", color = Text3,
+                                        style = MaterialTheme.typography.labelSmall) },
+                                    singleLine = true,
+                                    colors = darkFieldColors(),
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.width(80.dp),
+                                    textStyle = MaterialTheme.typography.bodySmall.copy(color = Text1)
+                                )
+                            }
+                        }
+                        if (totalQty > 0 && unitPrice > 0) {
+                            Text(
+                                "${"%.2f".format(totalQty)} units × ${formatCurrency(unitPrice, currencySymbol)} = ${formatCurrency(unitPrice * totalQty, currencySymbol)}",
+                                color = Text3, style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
             }
         }
     }

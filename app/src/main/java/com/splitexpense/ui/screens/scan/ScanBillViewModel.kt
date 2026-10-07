@@ -11,6 +11,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.splitexpense.SplitExpenseApplication
 import com.splitexpense.data.db.entity.Category
+import com.splitexpense.data.db.entity.ItemSplitMode
 import com.splitexpense.data.db.entity.Member
 import com.splitexpense.data.repository.BillItemData
 import com.splitexpense.data.repository.ExpenseRepository
@@ -31,10 +32,25 @@ enum class ScanPhase { CAPTURE, PROCESSING, REVIEW }
 data class BillItemState(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
-    val amount: String,                              // editable string
-    val assignedMemberIds: Set<String> = emptySet() // empty = all group members
+    /** EQUAL/PERCENTAGE: total amount. QUANTITY: unit price. */
+    val amount: String,
+    val splitMode: ItemSplitMode = ItemSplitMode.EQUAL,
+    val assignedMemberIds: Set<String> = emptySet(),
+    val memberWeights: Map<String, String> = emptyMap(),
+    /** When true the item is a discount / refund and its amount is negative. */
+    val isDiscount: Boolean = false
 ) {
-    val parsedAmount: Double get() = amount.toDoubleOrNull() ?: 0.0
+    val parsedAmount: Double get() {
+        val raw = when (splitMode) {
+            ItemSplitMode.EQUAL, ItemSplitMode.PERCENTAGE -> amount.toDoubleOrNull() ?: 0.0
+            ItemSplitMode.QUANTITY -> {
+                val unit = amount.toDoubleOrNull() ?: 0.0
+                val totalQty = memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                unit * totalQty
+            }
+        }
+        return if (isDiscount) -raw else raw
+    }
 }
 
 data class ScanBillUiState(
@@ -58,16 +74,36 @@ data class ScanBillUiState(
 ) {
     val total: Double get() = items.sumOf { it.parsedAmount }
 
-    /** Per-member totals derived from item assignments. */
+    /** Per-member totals derived from item assignments (handles all three split modes). */
     fun memberTotals(allMemberIds: List<String>): Map<String, Double> {
         val result = mutableMapOf<String, Double>()
         items.forEach { item ->
             val amt = item.parsedAmount
             if (amt <= 0) return@forEach
-            val assignees = item.assignedMemberIds.ifEmpty { allMemberIds.toSet() }
-            if (assignees.isEmpty()) return@forEach
-            val share = amt / assignees.size
-            assignees.forEach { id -> result[id] = (result[id] ?: 0.0) + share }
+            when (item.splitMode) {
+                ItemSplitMode.PERCENTAGE -> {
+                    val totalPct = item.memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                    if (totalPct <= 0) return@forEach
+                    item.memberWeights.forEach { (id, pctStr) ->
+                        val pct = pctStr.toDoubleOrNull() ?: 0.0
+                        if (pct > 0) result[id] = (result[id] ?: 0.0) + amt * pct / totalPct
+                    }
+                }
+                ItemSplitMode.QUANTITY -> {
+                    val totalQty = item.memberWeights.values.sumOf { it.toDoubleOrNull() ?: 0.0 }
+                    if (totalQty <= 0) return@forEach
+                    item.memberWeights.forEach { (id, qtyStr) ->
+                        val qty = qtyStr.toDoubleOrNull() ?: 0.0
+                        if (qty > 0) result[id] = (result[id] ?: 0.0) + amt * qty / totalQty
+                    }
+                }
+                ItemSplitMode.EQUAL -> {
+                    val assignees = item.assignedMemberIds.ifEmpty { allMemberIds.toSet() }
+                    if (assignees.isEmpty()) return@forEach
+                    val share = amt / assignees.size
+                    assignees.forEach { id -> result[id] = (result[id] ?: 0.0) + share }
+                }
+            }
         }
         return result
     }
@@ -145,7 +181,11 @@ class ScanBillViewModel(
                             description  = bill.description,
                             category     = bill.category,
                             items        = bill.items.map { item ->
-                                BillItemState(name = item.name, amount = "%.2f".format(item.amount))
+                                BillItemState(
+                                        name       = item.name,
+                                        amount     = "%.2f".format(Math.abs(item.amount)),
+                                        isDiscount = item.amount < 0
+                                    )
                             }
                         )
                     }
@@ -195,8 +235,18 @@ class ScanBillViewModel(
         item.copy(assignedMemberIds = set)
     }
 
+    fun onItemSplitModeChange(itemIndex: Int, mode: ItemSplitMode) = updateItem(itemIndex) {
+        it.copy(splitMode = mode, assignedMemberIds = emptySet(), memberWeights = emptyMap())
+    }
+
+    fun onItemDiscountToggle(itemIndex: Int) = updateItem(itemIndex) { it.copy(isDiscount = !it.isDiscount) }
+
+    fun onItemWeightChange(itemIndex: Int, memberId: String, value: String) = updateItem(itemIndex) { item ->
+        item.copy(memberWeights = item.memberWeights + (memberId to value))
+    }
+
     fun addItem() = _state.update {
-        it.copy(items = it.items + BillItemState(name = "", amount = "0.00"))
+        it.copy(items = it.items + BillItemState(name = "", amount = ""))
     }
 
     fun removeItem(index: Int) = _state.update {
@@ -228,11 +278,11 @@ class ScanBillViewModel(
         if (s.items.any { it.name.isBlank() }) {
             _state.update { it.copy(error = "All items must have a name") }; return
         }
-        if (s.items.any { it.parsedAmount < 0.01 }) {
-            _state.update { it.copy(error = "All item amounts must be at least ${s.currencySymbol}0.01") }; return
+        if (s.items.any { Math.abs(it.parsedAmount) < 0.01 }) {
+            _state.update { it.copy(error = "All item amounts must be non-zero") }; return
         }
-        if (s.total < 0.01) {
-            _state.update { it.copy(error = "Total must be greater than zero") }; return
+        if (Math.abs(s.total) < 0.01) {
+            _state.update { it.copy(error = "Total must be non-zero") }; return
         }
 
         _state.update { it.copy(isSaving = true, error = null) }
@@ -248,7 +298,9 @@ class ScanBillViewModel(
                         BillItemData(
                             name              = item.name.trim().ifBlank { "Item" },
                             amount            = item.parsedAmount,
-                            assignedMemberIds = item.assignedMemberIds.toList()
+                            assignedMemberIds = item.assignedMemberIds.toList(),
+                            splitMode         = item.splitMode,
+                            memberWeights     = item.memberWeights.mapValues { (_, v) -> v.toDoubleOrNull() ?: 0.0 }
                         )
                     },
                     allMemberIds = allMemberIds

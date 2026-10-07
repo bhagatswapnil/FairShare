@@ -13,9 +13,11 @@ import com.splitexpense.data.db.entity.ExpenseItem
 import com.splitexpense.data.db.entity.ExpenseSplit
 import com.splitexpense.data.db.entity.Group
 import com.splitexpense.data.db.entity.Member
+import com.splitexpense.data.db.entity.MemberAccount
 import com.splitexpense.data.db.entity.Settlement
 import com.splitexpense.data.model.DebtTransaction
 import com.splitexpense.data.model.MemberBalance
+import com.splitexpense.data.model.mergeBalancesByAccount
 import com.splitexpense.data.repository.ExpenseRepository
 import com.splitexpense.util.AppSettingsManager
 import com.splitexpense.util.PdfExporter
@@ -29,7 +31,12 @@ data class GroupUiState(
     val group: Group? = null,
     val members: List<Member> = emptyList(),
     val expenses: List<Expense> = emptyList(),
+    /** Per-member balances (individual view: charts, total spend). */
     val balances: List<MemberBalance> = emptyList(),
+    /** Linked members folded into one balance per account — the settle-up view. */
+    val accountBalances: List<MemberBalance> = emptyList(),
+    val accounts: List<MemberAccount> = emptyList(),
+    /** Computed from [accountBalances], so linked members settle as one party. */
     val simplifiedDebts: List<DebtTransaction> = emptyList(),
     val categorySpending: Map<Category, Double> = emptyMap(),
     val totalExpense: Double = 0.0,
@@ -76,15 +83,21 @@ class GroupViewModel(
         }
 
         viewModelScope.launch {
-            // Combine 5 flows: group, members, expenses, splits, settlements
+            // Combine 5 flows: group, members+accounts, expenses, splits, settlements.
+            // Accounts are pre-combined with members (not a separate coroutine) because
+            // accountBalances/simplifiedDebts need both in the same emission.
             combine(
                 repository.getGroupById(groupId),
-                repository.getMembersForGroup(groupId),
+                repository.getMembersForGroup(groupId)
+                    .combine(repository.getAccountsForGroup(groupId)) { m, a -> m to a },
                 repository.getExpensesForGroup(groupId),
                 repository.getSplitsForGroup(groupId),
                 repository.getSettlementsForGroup(groupId)
-            ) { group, members, expenses, splits, settlements ->
+            ) { group, (members, accounts), expenses, splits, settlements ->
                 val balances = repository.calculateBalances(members, expenses, splits, settlements)
+                val accountBalances = mergeBalancesByAccount(
+                    members, balances, accounts.associate { it.id to it.name }
+                )
                 val memberIdsWithExpenses = buildSet<String> {
                     expenses.forEach { add(it.paidById) }
                     splits.forEach { add(it.memberId) }
@@ -97,7 +110,9 @@ class GroupViewModel(
                     members                = members,
                     expenses               = expenses,
                     balances               = balances,
-                    simplifiedDebts        = repository.simplifyDebts(balances),
+                    accountBalances        = accountBalances,
+                    accounts               = accounts,
+                    simplifiedDebts        = repository.simplifyDebts(accountBalances),
                     categorySpending       = repository.categorySpending(expenses, splits, null),
                     totalExpense           = expenses.sumOf { it.amount },
                     settlements            = settlements,
@@ -155,6 +170,22 @@ class GroupViewModel(
         viewModelScope.launch { repository.deleteMember(member) }
     }
 
+    // ── Linked account actions ─────────────────────────────────────────────────
+
+    fun linkMembers(name: String, memberIds: List<String>) {
+        if (memberIds.size < 2 || name.isBlank()) return
+        viewModelScope.launch { repository.linkMembers(groupId, name, memberIds) }
+    }
+
+    fun renameAccount(account: MemberAccount, newName: String) {
+        if (newName.isBlank()) return
+        viewModelScope.launch { repository.renameAccount(account, newName) }
+    }
+
+    fun unlinkAccount(account: MemberAccount) {
+        viewModelScope.launch { repository.unlinkAccount(account) }
+    }
+
     // ── Expense actions ────────────────────────────────────────────────────────
 
     fun deleteExpense(expense: Expense) {
@@ -205,8 +236,9 @@ class GroupViewModel(
                         members        = state.members,
                         expenses       = state.expenses,
                         splits         = allSplits,
-                        balances       = state.balances,
+                        balances       = state.accountBalances,
                         debts          = state.simplifiedDebts,
+                        settlements    = state.settlements,
                         expenseItems   = allItems,
                         currencySymbol = state.currencySymbol
                     )

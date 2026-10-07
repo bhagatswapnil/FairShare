@@ -23,8 +23,19 @@ interface MemberDao {
     @Query("SELECT groupId, COUNT(*) AS count FROM members GROUP BY groupId")
     fun getGroupMemberCounts(): Flow<List<GroupMemberCount>>
 
+    /**
+     * Insert only — never use this to *update* an existing member. REPLACE is DELETE + INSERT,
+     * and the DELETE cascades to expense_splits (FK memberId ON DELETE CASCADE), silently
+     * wiping the member's splits. Use a targeted UPDATE query like [setAccountId] instead.
+     */
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMember(member: Member)
+
+    @Query("UPDATE members SET accountId = :accountId WHERE id IN (:ids)")
+    suspend fun setAccountId(ids: List<String>, accountId: String?)
+
+    @Query("SELECT * FROM members WHERE accountId = :accountId")
+    suspend fun getMembersInAccount(accountId: String): List<Member>
 
     @Delete
     suspend fun deleteMember(member: Member)
